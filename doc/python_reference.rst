@@ -233,6 +233,7 @@ Visualization
    plot_dipole_locations
    plot_drop_log
    plot_epochs
+   plot_epochs_psd_topomap
    plot_events
    plot_evoked
    plot_evoked_image
@@ -313,7 +314,7 @@ Projections:
    get_builtin_montages
    make_dig_montage
    read_dig_polhemus_isotrak
-   read_dig_captrack
+   read_dig_captrak
    read_dig_dat
    read_dig_egi
    read_dig_fif
@@ -346,12 +347,14 @@ Projections:
    ICA
    Xdawn
    annotate_movement
+   annotate_muscle_zscore
    compute_average_dev_head_t
    compute_current_source_density
    compute_proj_ecg
    compute_proj_eog
    create_ecg_epochs
    create_eog_epochs
+   find_bad_channels_maxwell
    find_ecg_events
    find_eog_events
    fix_stim_artifact
@@ -363,7 +366,6 @@ Projections:
    oversampled_temporal_projection
    peak_finder
    read_ica
-   run_ica
    corrmap
    read_ica_eeglab
 
@@ -383,6 +385,7 @@ Projections:
    source_detector_distances
    short_channels
    scalp_coupling_index
+   temporal_derivative_distribution_repair
 
 EEG referencing:
 
@@ -651,6 +654,7 @@ Inverse Solutions
 
    InverseOperator
    apply_inverse
+   apply_inverse_cov
    apply_inverse_epochs
    apply_inverse_raw
    compute_source_psd
@@ -663,7 +667,7 @@ Inverse Solutions
    source_band_induced_power
    source_induced_power
    write_inverse_operator
-   make_resolution_matrix
+   make_inverse_resolution_matrix
    resolution_metrics
    get_cross_talk
    get_point_spread
@@ -709,6 +713,7 @@ Inverse Solutions
    rap_music
    tf_dics
    tf_lcmv
+   make_lcmv_resolution_matrix
 
 .. currentmodule:: mne
 
@@ -744,6 +749,7 @@ Source Space Data
    BiHemiLabel
    Label
    MixedSourceEstimate
+   MixedVectorSourceEstimate
    SourceEstimate
    VectorSourceEstimate
    VolSourceEstimate
@@ -1030,6 +1036,7 @@ Logging and Configuration
    set_log_level
    set_log_file
    set_config
+   set_cache_dir
    sys_info
    verbose
 

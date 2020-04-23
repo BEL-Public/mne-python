@@ -14,14 +14,14 @@ import numpy as np
 from .baseline import rescale
 from .channels.channels import (ContainsMixin, UpdateChannelsMixin,
                                 SetChannelsMixin, InterpolationMixin)
-from .channels.layout import _merge_grad_data, _pair_grad_sensors
+from .channels.layout import _merge_ch_data, _pair_grad_sensors
+from .defaults import _EXTRAPOLATE_DEFAULT, _BORDER_DEFAULT
 from .filter import detrend, FilterMixin
 from .utils import (check_fname, logger, verbose, _time_mask, warn, sizeof_fmt,
                     SizeMixin, copy_function_doc_to_method_doc, _validate_type,
                     fill_doc, _check_option, ShiftTimeMixin, _build_data_frame,
                     _check_pandas_installed, _check_pandas_index_arguments,
-                    _convert_times, _scale_dataframe_data, _check_time_format,
-                    _check_scaling_time)
+                    _convert_times, _scale_dataframe_data, _check_time_format)
 from .viz import (plot_evoked, plot_evoked_topomap, plot_evoked_field,
                   plot_evoked_image, plot_evoked_topo)
 from .viz.evoked import plot_evoked_white, plot_evoked_joint
@@ -31,8 +31,7 @@ from .io.constants import FIFF
 from .io.open import fiff_open
 from .io.tag import read_tag
 from .io.tree import dir_tree_find
-from .io.pick import (channel_type, pick_types, _pick_data_channels,
-                      _picks_to_idx)
+from .io.pick import pick_types, _picks_to_idx
 from .io.meas_info import read_meas_info, write_meas_info
 from .io.proj import ProjMixin
 from .io.write import (start_file, start_block, end_file, end_block,
@@ -99,11 +98,9 @@ class Evoked(ProjMixin, ContainsMixin, UpdateChannelsMixin, SetChannelsMixin,
         Last time sample.
     comment : str
         Comment on dataset. Can be the condition.
-    times : array
-        Array of time instants in seconds.
     data : array of shape (n_channels, n_times)
         Evoked response.
-    times :  ndarray
+    times :  array
         Time vector in seconds. Goes from `tmin` to `tmax`. Time interval
         between consecutive time samples is equal to the inverse of the
         sampling frequency.
@@ -329,7 +326,7 @@ class Evoked(ProjMixin, ContainsMixin, UpdateChannelsMixin, SetChannelsMixin,
             background_color=background_color, noise_cov=noise_cov, show=show)
 
     @copy_function_doc_to_method_doc(plot_evoked_topomap)
-    def plot_topomap(self, times="auto", ch_type=None, layout=None, vmin=None,
+    def plot_topomap(self, times="auto", ch_type=None, vmin=None,
                      vmax=None, cmap=None, sensors=True, colorbar=True,
                      scalings=None, units=None, res=64,
                      size=1, cbar_fmt="%3.1f",
@@ -337,24 +334,26 @@ class Evoked(ProjMixin, ContainsMixin, UpdateChannelsMixin, SetChannelsMixin,
                      proj=False, show=True, show_names=False, title=None,
                      mask=None, mask_params=None, outlines='head',
                      contours=6, image_interp='bilinear', average=None,
-                     head_pos=None, axes=None, extrapolate='box', sphere=None,
-                     border=0):
+                     axes=None, extrapolate=_EXTRAPOLATE_DEFAULT, sphere=None,
+                     border=_BORDER_DEFAULT, nrows=1, ncols='auto'):
         return plot_evoked_topomap(
-            self, times=times, ch_type=ch_type, layout=layout, vmin=vmin,
+            self, times=times, ch_type=ch_type, vmin=vmin,
             vmax=vmax, cmap=cmap, sensors=sensors, colorbar=colorbar,
             scalings=scalings, units=units, res=res,
             size=size, cbar_fmt=cbar_fmt, time_unit=time_unit,
             time_format=time_format, proj=proj, show=show,
             show_names=show_names, title=title, mask=mask,
             mask_params=mask_params, outlines=outlines, contours=contours,
-            image_interp=image_interp, average=average, head_pos=head_pos,
-            axes=axes, extrapolate=extrapolate, sphere=sphere, border=border)
+            image_interp=image_interp, average=average,
+            axes=axes, extrapolate=extrapolate, sphere=sphere, border=border,
+            nrows=nrows, ncols=ncols)
 
     @copy_function_doc_to_method_doc(plot_evoked_field)
     def plot_field(self, surf_maps, time=None, time_label='t = %0.0f ms',
-                   n_jobs=1):
+                   n_jobs=1, fig=None, verbose=None):
         return plot_evoked_field(self, surf_maps, time=time,
-                                 time_label=time_label, n_jobs=n_jobs)
+                                 time_label=time_label, n_jobs=n_jobs,
+                                 fig=fig, verbose=verbose)
 
     @copy_function_doc_to_method_doc(plot_evoked_white)
     def plot_white(self, noise_cov, show=True, rank=None, time_unit='s',
@@ -451,10 +450,13 @@ class Evoked(ProjMixin, ContainsMixin, UpdateChannelsMixin, SetChannelsMixin,
 
         Notes
         -----
+        This method returns a copy and does not modify the data it
+        operates on. It also returns an EvokedArraw instance.
+
         .. versionadded:: 0.9.0
         """
-        from .forward import _as_meg_type_evoked
-        return _as_meg_type_evoked(self, ch_type=ch_type, mode=mode)
+        from .forward import _as_meg_type_inst
+        return _as_meg_type_inst(self, ch_type=ch_type, mode=mode)
 
     @fill_doc
     def detrend(self, order=1, picks=None):
@@ -549,8 +551,7 @@ class Evoked(ProjMixin, ContainsMixin, UpdateChannelsMixin, SetChannelsMixin,
         """  # noqa: E501
         supported = ('mag', 'grad', 'eeg', 'seeg', 'ecog', 'misc', 'hbo',
                      'hbr', 'None', 'fnirs_raw', 'fnirs_od')
-        data_picks = _pick_data_channels(self.info, with_ref_meg=False)
-        types_used = {channel_type(self.info, idx) for idx in data_picks}
+        types_used = self.get_channel_types(unique=True, only_data_chs=True)
 
         _check_option('ch_type', str(ch_type), supported)
 
@@ -600,7 +601,7 @@ class Evoked(ProjMixin, ContainsMixin, UpdateChannelsMixin, SetChannelsMixin,
             ch_names = [ch_names[k] for k in picks]
 
         if merge_grads:
-            data = _merge_grad_data(data)
+            data, _ = _merge_ch_data(data, ch_type, [])
             ch_names = [ch_name[:-1] + 'X' for ch_name in ch_names[::2]]
 
         ch_idx, time_idx, max_amp = _get_peak(data, self.times, tmin,
@@ -615,7 +616,7 @@ class Evoked(ProjMixin, ContainsMixin, UpdateChannelsMixin, SetChannelsMixin,
         return out
 
     @fill_doc
-    def to_data_frame(self, picks=None, index=None, scaling_time=None,
+    def to_data_frame(self, picks=None, index=None,
                       scalings=None, copy=True, long_format=False,
                       time_format='ms'):
         """Export data in tabular structure as a pandas DataFrame.
@@ -629,7 +630,6 @@ class Evoked(ProjMixin, ContainsMixin, UpdateChannelsMixin, SetChannelsMixin,
         %(picks_all)s
         %(df_index_evk)s
             Defaults to ``None``.
-        %(df_scaling_time_deprecated)s
         %(df_scalings)s
         %(df_copy)s
         %(df_longform_raw)s
@@ -641,8 +641,6 @@ class Evoked(ProjMixin, ContainsMixin, UpdateChannelsMixin, SetChannelsMixin,
         -------
         %(df_return)s
         """
-        # check deprecation
-        _check_scaling_time(scaling_time)
         # check pandas once here, instead of in each private utils function
         pd = _check_pandas_installed()  # noqa
         # arg checking

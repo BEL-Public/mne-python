@@ -980,8 +980,8 @@ def write_surface(fname, coords, faces, create_stamp='', volume_info=None,
         vnum = len(coords)
         fnum = len(faces)
         fid.write(pack('>2i', vnum, fnum))
-        fid.write(np.array(coords, dtype='>f4').tostring())
-        fid.write(np.array(faces, dtype='>i4').tostring())
+        fid.write(np.array(coords, dtype='>f4').tobytes())
+        fid.write(np.array(faces, dtype='>i4').tobytes())
 
         # Add volume info, if given
         if volume_info is not None and len(volume_info) > 0:
@@ -1426,6 +1426,8 @@ def _find_nearest_tri_pts(rrs, pt_triss, pt_lens,
         pqs = np.empty((len(drs), 2))
         dists = np.empty(len(drs))
         dist = np.inf
+        # make life easier for numba var typing
+        p, q, pt = np.float64(0.), np.float64(1.), np.int64(0)
         found = False
         for ii in range(len(drs)):
             pqs[ii] = np.dot(mats[ii], np.dot(r1213s[ii], drs[ii]))

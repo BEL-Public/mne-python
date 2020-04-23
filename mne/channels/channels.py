@@ -22,7 +22,8 @@ from ..io.constants import FIFF
 from ..io.meas_info import anonymize_info, Info, MontageMixin
 from ..io.pick import (channel_type, pick_info, pick_types, _picks_by_type,
                        _check_excludes_includes, _contains_ch_type,
-                       channel_indices_by_type, pick_channels, _picks_to_idx)
+                       channel_indices_by_type, pick_channels, _picks_to_idx,
+                       _get_channel_types)
 
 
 def _get_meg_system(info):
@@ -207,16 +208,25 @@ class ContainsMixin(object):
         """The current gradient compensation grade."""
         return get_current_comp(self.info)
 
-    def get_channel_types(self):
+    @fill_doc
+    def get_channel_types(self, picks=None, unique=False, only_data_chs=False):
         """Get a list of channel type for each channel.
+
+        Parameters
+        ----------
+        %(picks_all)s
+        unique : bool
+            Whether to return only unique channel types. Default is ``False``.
+        only_data_chs : bool
+            Whether to ignore non-data channels. Default is ``False``.
 
         Returns
         -------
         channel_types : list
             The channel types.
         """
-        return [channel_type(self.info, n)
-                for n in range(len(self.info['ch_names']))]
+        return _get_channel_types(self.info, picks=picks, unique=unique,
+                                  only_data_chs=only_data_chs)
 
 
 # XXX Eventually de-duplicate with _kind_dict of mne/io/meas_info.py
@@ -282,39 +292,10 @@ class SetChannelsMixin(MontageMixin):
                           ch_type='auto', verbose=None):
         """Specify which reference to use for EEG data.
 
-        By default, MNE-Python will automatically re-reference the EEG signal
-        to use an average reference (see below). Use this function to
-        explicitly specify the desired reference for EEG. This can be either an
-        existing electrode or a new virtual channel. This function will
-        re-reference the data according to the desired reference and prevent
-        MNE-Python from automatically adding an average reference projection.
-
-        Some common referencing schemes and the corresponding value for the
-        ``ref_channels`` parameter:
-
-        No re-referencing:
-            If the EEG data is already using the proper reference, set
-            ``ref_channels=[]``. This will prevent MNE-Python from
-            automatically adding an average reference projection.
-
-        Average reference:
-            A new virtual reference electrode is created by averaging the
-            current EEG signal by setting ``ref_channels='average'``. Bad EEG
-            channels are automatically excluded if they are properly set in
-            ``info['bads']``.
-
-        A single electrode:
-            Set ``ref_channels`` to a list containing the name of the channel
-            that will act as the new reference, for example
-            ``ref_channels=['Cz']``.
-
-        The mean of multiple electrodes:
-            A new virtual reference electrode is created by computing the
-            average of the current EEG signal recorded from two or more
-            selected channels. Set ``ref_channels`` to a list of channel names,
-            indicating which channels to use. For example, to apply an average
-            mastoid reference, when using the 10-20 naming scheme, set
-            ``ref_channels=['M1', 'M2']``.
+        Use this function to explicitly specify the desired reference for EEG.
+        This can be either an existing electrode or a new virtual channel.
+        This function will re-reference the data according to the desired
+        reference.
 
         Parameters
         ----------
@@ -347,27 +328,7 @@ class SetChannelsMixin(MontageMixin):
             Data with EEG channels re-referenced. If ``ref_channels='average'``
             and ``projection=True`` a projection will be added instead of
             directly re-referencing the data.
-
-        See Also
-        --------
-        mne.set_bipolar_reference : Convenience function for creating bipolar
-                                    references.
-
-        Notes
-        -----
-        1. If a reference is requested that is not the average reference, this
-           function removes any pre-existing average reference projections.
-
-        2. During source localization, the EEG signal should have an average
-           reference.
-
-        3. In order to apply a reference, the data must be preloaded. This is
-           not necessary if ``ref_channels='average'`` and ``projection=True``.
-
-        4. For an average reference, bad EEG channels are automatically
-           excluded if they are properly set in ``info['bads']``.
-
-        .. versionadded:: 0.9.0
+        %(set_eeg_reference_see_also_notes)s
         """
         from ..io.reference import set_eeg_reference
         return set_eeg_reference(self, ref_channels=ref_channels, copy=False,
@@ -885,12 +846,17 @@ class UpdateChannelsMixin(object):
 
     def _pick_drop_channels(self, idx):
         # avoid circular imports
+        from ..io import BaseRaw
         from ..time_frequency import AverageTFR, EpochsTFR
 
-        _check_preload(self, 'adding, dropping, or reordering channels')
+        if not isinstance(self, BaseRaw):
+            _check_preload(self, 'adding, dropping, or reordering channels')
 
         if getattr(self, 'picks', None) is not None:
             self.picks = self.picks[idx]
+
+        if getattr(self, '_read_picks', None) is not None:
+            self._read_picks = [r[idx] for r in self._read_picks]
 
         if hasattr(self, '_cals'):
             self._cals = self._cals[idx]
@@ -902,7 +868,10 @@ class UpdateChannelsMixin(object):
 
         # All others (Evoked, Epochs, Raw) have chs axis=-2
         axis = -3 if isinstance(self, (AverageTFR, EpochsTFR)) else -2
-        self._data = self._data.take(idx, axis=axis)
+        if hasattr(self, '_data'):  # skip non-preloaded Raw
+            self._data = self._data.take(idx, axis=axis)
+        else:
+            assert isinstance(self, BaseRaw) and not self.preload
         return self
 
     def add_channels(self, add_list, force_update_info=False):
@@ -993,6 +962,11 @@ class UpdateChannelsMixin(object):
         if isinstance(self, BaseRaw):
             self._cals = np.concatenate([getattr(inst, '_cals')
                                          for inst in [self] + add_list])
+            # We should never use these since data are preloaded, let's just
+            # set it to something large and likely to break (2 ** 31 - 1)
+            extra_idx = [2147483647] * len(add_list)
+            self._read_picks = [
+                np.concatenate([r, extra_idx]) for r in self._read_picks]
         return self
 
 
@@ -1032,7 +1006,8 @@ class InterpolationMixin(object):
         .. versionadded:: 0.9.0
         """
         from ..bem import _check_origin
-        from .interpolation import _interpolate_bads_eeg, _interpolate_bads_meg
+        from .interpolation import _interpolate_bads_eeg,\
+            _interpolate_bads_meg, _interpolate_bads_nirs
 
         _check_preload(self, "interpolation")
 
@@ -1042,6 +1017,7 @@ class InterpolationMixin(object):
         origin = _check_origin(origin, self.info)
         _interpolate_bads_eeg(self, origin=origin)
         _interpolate_bads_meg(self, mode=mode, origin=origin)
+        _interpolate_bads_nirs(self)
 
         if reset_bads is True:
             self.info['bads'] = []
@@ -1126,7 +1102,7 @@ def read_ch_connectivity(fname, picks=None):
 
     More information on these neighbor definitions can be found on the related
     `FieldTrip documentation pages
-    <http://www.fieldtrip.org/template/neighbours>`__.
+    <http://www.fieldtriptoolbox.org/template/neighbours/>`_.
 
     Parameters
     ----------

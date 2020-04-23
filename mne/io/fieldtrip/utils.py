@@ -75,7 +75,8 @@ def _create_info(ft_struct, raw_info):
     else:
         montage = _create_montage(ft_struct)
 
-        info = create_info(ch_names, sfreq, montage=montage)
+        info = create_info(ch_names, sfreq)
+        info.set_montage(montage)
         chs = _create_info_chs(ft_struct)
         info['chs'] = chs
         info._update_redundant()
@@ -309,9 +310,10 @@ def _process_channel_meg(cur_ch, grad):
     original_orientation = np.squeeze(grad['chanori'][chan_idx_in_grad, :])
     try:
         orientation = rotation3d_align_z_axis(original_orientation).T
-        orientation = orientation.flatten()
     except AssertionError:
-        orientation = np.eye(4, 4).flatten()
+        orientation = np.eye(3)
+    assert orientation.shape == (3, 3)
+    orientation = orientation.flatten()
     chanunit = grad['chanunit'][chan_idx_in_grad]
 
     cur_ch['loc'] = np.hstack((position, orientation))

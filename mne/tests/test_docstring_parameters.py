@@ -64,6 +64,7 @@ docstring_ignores = {
     'mne.fixes',
     'mne.io.write',
     'mne.io.meas_info.Info',
+    'mne.utils.docs.deprecated',
 }
 char_limit = 800  # XX eventually we should probably get this lower
 tab_ignores = [
@@ -220,7 +221,6 @@ detrend
 dir_tree_find
 fast_cross_3d
 fiff_open
-find_outliers
 find_source_space_hemi
 find_tag
 get_score_funcs

@@ -6,7 +6,6 @@
 
 import atexit
 from functools import partial
-import inspect
 import json
 import os
 import os.path as op
@@ -264,8 +263,9 @@ def set_config(key, value, home_dir=None, set_env=True):
     _validate_type(key, 'str', "key")
     # While JSON allow non-string types, we allow users to override config
     # settings using env, which are strings, so we enforce that here
-    _validate_type(value, (str, type(None)), "value",
-                   "None or string")
+    _validate_type(value, (str, 'path-like', type(None)), 'value')
+    if value is not None:
+        value = str(value)
 
     if key not in known_config_types and not \
             any(k in key for k in known_config_wildcards):
@@ -533,16 +533,3 @@ def sys_info(fid=None, show_paths=False):
                 version = mod.__version__
             out += '%s%s\n' % (version, extra)
     print(out, end='', file=fid)
-
-
-def _get_call_line(in_verbose=False):
-    """Get the call line from within a function."""
-    # XXX Eventually we could auto-triage whether in a `verbose` decorated
-    # function or not.
-    # NB This probably only works for functions that are undecorated,
-    # or decorated by `verbose`.
-    back = 2 if not in_verbose else 4
-    call_frame = inspect.getouterframes(inspect.currentframe())[back][0]
-    context = inspect.getframeinfo(call_frame).code_context
-    context = 'unknown' if context is None else context[0].strip()
-    return context

@@ -40,7 +40,7 @@ VALID_EXTENSIONS = ['raw.fif', 'raw.fif.gz', 'sss.fif', 'sss.fif.gz',
                     '-eve.fif', '-eve.fif.gz', '-cov.fif', '-cov.fif.gz',
                     '-trans.fif', '-trans.fif.gz', '-fwd.fif', '-fwd.fif.gz',
                     '-epo.fif', '-epo.fif.gz', '-inv.fif', '-inv.fif.gz',
-                    '-ave.fif', '-ave.fif.gz', 'T1.mgz']
+                    '-ave.fif', '-ave.fif.gz', 'T1.mgz', 'meg.fif']
 SECTION_ORDER = ['raw', 'events', 'epochs', 'evoked', 'covariance', 'trans',
                  'mri', 'forward', 'inverse']
 
@@ -68,17 +68,14 @@ def _fig_to_img(fig, image_format='png', scale=None, **kwargs):
         plt.close('all')
         fig = fig(**kwargs)
     elif not isinstance(fig, Figure):
-        from .viz.backends.renderer import (
-            _check_3d_figure, _take_3d_screenshot,
-            _close_3d_figure, MNE_3D_BACKEND_TESTING
-        )
-        _check_3d_figure(figure=fig)
+        from .viz.backends.renderer import backend, MNE_3D_BACKEND_TESTING
+        backend._check_3d_figure(figure=fig)
         if not MNE_3D_BACKEND_TESTING:
-            img = _take_3d_screenshot(figure=fig)
+            img = backend._take_3d_screenshot(figure=fig)
         else:  # Testing mode
             img = np.zeros((2, 2, 3))
 
-        _close_3d_figure(figure=fig)
+        backend._close_3d_figure(figure=fig)
         fig = _ndarray_to_fig(img)
 
     output = BytesIO()
@@ -139,27 +136,24 @@ def _figs_to_mrislices(sl, n_jobs, **kwargs):
 def _iterate_trans_views(function, **kwargs):
     """Auxiliary function to iterate over views in trans fig."""
     import matplotlib.pyplot as plt
-    from .viz.backends.renderer import (
-        _check_3d_figure, _take_3d_screenshot, _close_all,
-        _set_3d_view, MNE_3D_BACKEND_TESTING
-    )
+    from .viz.backends.renderer import backend, MNE_3D_BACKEND_TESTING
 
     fig = function(**kwargs)
-    _check_3d_figure(fig)
+    backend._check_3d_figure(fig)
 
     views = [(90, 90), (0, 90), (0, -90)]
     fig2, axes = plt.subplots(1, len(views))
     for view, ax in zip(views, axes):
-        _set_3d_view(fig, azimuth=view[0], elevation=view[1],
-                     focalpoint=None, distance=None)
+        backend._set_3d_view(fig, azimuth=view[0], elevation=view[1],
+                             focalpoint=None, distance=None)
         if not MNE_3D_BACKEND_TESTING:
-            im = _take_3d_screenshot(figure=fig)
+            im = backend._take_3d_screenshot(figure=fig)
         else:  # Testing mode
             im = np.zeros((2, 2, 3))
         ax.imshow(im)
         ax.axis('off')
 
-    _close_all()
+    backend._close_all()
     img = _fig_to_img(fig2, image_format='png')
     return img
 
@@ -203,7 +197,7 @@ def _get_toc_property(fname):
         tooltip = fname
         text = op.basename(fname)
     elif fname.endswith(('raw.fif', 'raw.fif.gz',
-                         'sss.fif', 'sss.fif.gz')):
+                         'sss.fif', 'sss.fif.gz', 'meg.fif')):
         div_klass = 'raw'
         tooltip = fname
         text = op.basename(fname)
@@ -260,7 +254,7 @@ def _iterate_files(report, fnames, info, cov, baseline, sfreq, on_error,
                               fname))
         try:
             if fname.endswith(('raw.fif', 'raw.fif.gz',
-                               'sss.fif', 'sss.fif.gz')):
+                               'sss.fif', 'sss.fif.gz', 'meg.fif')):
                 html = report._render_raw(fname)
                 report_fname = fname
                 report_sectionlabel = 'raw'
@@ -1477,7 +1471,7 @@ class Report(object):
                 self.html.append(self._render_bem(
                     self.subject, self.subjects_dir, mri_decim, n_jobs))
                 self.fnames.append('bem')
-                self._sectionlabels.append('mri')
+                self._sectionlabels.append('bem')
             else:
                 warn('`subjects_dir` and `subject` not provided. Cannot '
                      'render MRI and -trans.fif(.gz) files.')
@@ -1969,7 +1963,7 @@ class Report(object):
             return html
 
     def _render_bem(self, subject, subjects_dir, decim, n_jobs,
-                    section='mri', caption='BEM'):
+                    section='bem', caption='BEM'):
         """Render mri+bem (only PNG)."""
         import nibabel as nib
 
@@ -2010,13 +2004,13 @@ class Report(object):
 
         global_id = self._get_id()
 
-        if section == 'mri' and 'mri' not in self.sections:
-            self.sections.append('mri')
-            self._sectionvars['mri'] = 'mri'
+        if section == 'bem' and 'bem' not in self.sections:
+            self.sections.append('bem')
+            self._sectionvars['bem'] = 'bem'
 
         name = caption
 
-        html += u'<li class="mri" id="%d">\n' % global_id
+        html += u'<li class="report_%s" id="%d">\n' % (section, global_id)
         html += u'<h4>%s</h4>\n' % name  # all other captions are h4
         html += self._render_one_bem_axis(mri_fname, surf_fnames, global_id,
                                           shape, 'axial', decim, n_jobs)

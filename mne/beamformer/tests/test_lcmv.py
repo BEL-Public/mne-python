@@ -10,7 +10,7 @@ from numpy.testing import (assert_array_almost_equal, assert_array_equal,
                            assert_array_less)
 
 import mne
-from mne import (convert_forward_solution, read_forward_solution,
+from mne import (convert_forward_solution, read_forward_solution, compute_rank,
                  VolVectorSourceEstimate, VolSourceEstimate)
 from mne.datasets import testing
 from mne.beamformer import (make_lcmv, apply_lcmv, apply_lcmv_epochs,
@@ -91,7 +91,8 @@ def _get_data(tmin=-0.1, tmax=0.15, all_forward=True, epochs=True,
             baseline=(None, 0), preload=epochs_preload, reject=reject)
         if epochs_preload:
             epochs.resample(200, npad=0)
-        epochs.crop(0, None)
+        with pytest.warns(RuntimeWarning, match='baseline = None'):
+            epochs.crop(0, None)
         evoked = epochs.average()
         info = evoked.info
     else:
@@ -104,7 +105,8 @@ def _get_data(tmin=-0.1, tmax=0.15, all_forward=True, epochs=True,
     noise_cov = mne.cov.regularize(noise_cov, info, mag=0.05, grad=0.05,
                                    eeg=0.1, proj=True, rank=None)
     if data_cov:
-        data_cov = mne.compute_covariance(epochs, tmin=0.04, tmax=0.145)
+        data_cov = mne.compute_covariance(
+            epochs, tmin=0.04, tmax=0.145, verbose='error')  # baseline warning
     else:
         data_cov = None
 
@@ -165,6 +167,7 @@ def test_lcmv_vector():
     lcmv_ori = list()
     for ti in range(n_vertices):
         this_evoked = evoked.copy().crop(evoked.times[ti], evoked.times[ti])
+        data_cov['diag'] = False
         data_cov['data'] = (np.outer(this_evoked.data, this_evoked.data) +
                             noise_cov['data'])
         vals = linalg.svdvals(data_cov['data'])
@@ -849,6 +852,23 @@ def test_depth_does_not_matter(bias_params_free, weight_norm, pick_ori):
         d2 *= np.sign(np.dot(d1.ravel(), d2.ravel()))
         atol = np.linalg.norm(d1) * 1e-7
         assert_allclose(d1, d2, atol=atol)
+
+
+def test_lcmv_maxfiltered():
+    """Test LCMV on maxfiltered data."""
+    raw = mne.io.read_raw_fif(fname_raw).fix_mag_coil_types()
+    raw_sss = mne.preprocessing.maxwell_filter(raw)
+    events = mne.find_events(raw_sss)
+    del raw
+    raw_sss.pick_types('mag')
+    assert len(raw_sss.ch_names) == 102
+    epochs = mne.Epochs(raw_sss, events)
+    data_cov = mne.compute_covariance(epochs, tmin=0)
+    fwd = mne.read_forward_solution(fname_fwd)
+    rank = compute_rank(data_cov, info=epochs.info)
+    assert rank == {'mag': 71}
+    for use_rank in ('info', rank, 'full', None):
+        make_lcmv(epochs.info, fwd, data_cov, rank=use_rank)
 
 
 run_tests_if_main()

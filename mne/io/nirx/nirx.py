@@ -78,8 +78,9 @@ class RawNIRX(BaseRaw):
 
         # Read number of rows/samples of wavelength data
         last_sample = -1
-        for line in _open(files['wl1']):
-            last_sample += 1
+        with _open(files['wl1']) as fid:
+            for line in fid:
+                last_sample += 1
 
         # Read participant information file
         inf = ConfigParser(allow_no_value=True)
@@ -268,11 +269,12 @@ class RawNIRX(BaseRaw):
         The returned data interleaves the wavelengths.
         """
         sdindex = self._raw_extras[fi]['sd_index']
+        nchan = self._raw_extras[fi]['orig_nchan']
 
         wls = [
             _read_csv_rows_cols(
                 self._raw_extras[fi]['files'][key],
-                start, stop, sdindex, len(self.ch_names) // 2).T
+                start, stop, sdindex, nchan // 2).T
             for key in ('wl1', 'wl2')
         ]
 

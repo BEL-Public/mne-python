@@ -19,12 +19,15 @@ from mne import (stats, SourceEstimate, VectorSourceEstimate,
                  spatio_temporal_src_connectivity, read_cov,
                  spatial_inter_hemi_connectivity, read_forward_solution,
                  spatial_src_connectivity, spatial_tris_connectivity,
-                 SourceSpaces, VolVectorSourceEstimate)
+                 SourceSpaces, VolVectorSourceEstimate,
+                 MixedVectorSourceEstimate, setup_volume_source_space,
+                 convert_forward_solution, pick_types_forward)
 from mne.datasets import testing
 from mne.fixes import fft, _get_img_fdata
 from mne.source_estimate import grade_to_tris, _get_vol_mask
+from mne.source_space import _get_src_nn
 from mne.minimum_norm import (read_inverse_operator, apply_inverse,
-                              apply_inverse_epochs)
+                              apply_inverse_epochs, make_inverse_operator)
 from mne.label import read_labels_from_annot, label_sign_flip
 from mne.utils import (requires_pandas, requires_sklearn,
                        requires_h5py, run_tests_if_main, requires_nibabel)
@@ -114,12 +117,12 @@ def test_volume_stc(tmpdir):
     vertno_reads = [vertno, vertno, np.arange(2), np.arange(2)]
     for data, vertno, vertno_read in zip(datas, vertnos, vertno_reads):
         if data.ndim in (1, 2):
-            stc = VolSourceEstimate(data, vertno, 0, 1)
+            stc = VolSourceEstimate(data, [vertno], 0, 1)
             ext = 'stc'
             klass = VolSourceEstimate
         else:
             assert data.ndim == 3
-            stc = VolVectorSourceEstimate(data, vertno, 0, 1)
+            stc = VolVectorSourceEstimate(data, [vertno], 0, 1)
             ext = 'h5'
             klass = VolVectorSourceEstimate
         fname_temp = tmpdir.join('temp-vl.' + ext)
@@ -128,7 +131,7 @@ def test_volume_stc(tmpdir):
             stc_new.save(fname_temp)
             stc_new = read_source_estimate(fname_temp)
             assert isinstance(stc_new, klass)
-            assert_array_equal(vertno_read, stc_new.vertices)
+            assert_array_equal(vertno_read, stc_new.vertices[0])
             assert_array_almost_equal(stc.data, stc_new.data)
 
     # now let's actually read a MNE-C processed file
@@ -144,7 +147,7 @@ def test_volume_stc(tmpdir):
             stc_new.save(fname_temp, ftype=ftype)
             stc_new = read_source_estimate(fname_temp)
             assert (isinstance(stc_new, VolSourceEstimate))
-            assert_array_equal(stc.vertices, stc_new.vertices)
+            assert_array_equal(stc.vertices[0], stc_new.vertices[0])
             assert_array_almost_equal(stc.data, stc_new.data)
 
 
@@ -208,7 +211,7 @@ def test_save_vol_stc_as_nifti(tmpdir):
 
     src = SourceSpaces([src[0], src[0]])
     stc = VolSourceEstimate(np.r_[stc.data, stc.data],
-                            [stc.vertices, stc.vertices],
+                            [stc.vertices[0], stc.vertices[0]],
                             tmin=stc.tmin, tstep=stc.tstep, subject='sample')
     img = stc.as_volume(src, dest='mri', mri_resolution=False)
     assert (img.shape == src[0]['shape'] + (len(stc.times),))
@@ -333,7 +336,7 @@ def test_stc_attributes():
     stc = _fake_stc()
     data = stc.data[:, np.newaxis, :]
     with pytest.raises(ValueError, match='2 dimensions for SourceEstimate'):
-        SourceEstimate(data, stc.vertices)
+        SourceEstimate(data, stc.vertices, 0, 1)
     stc = SourceEstimate(data[:, 0, 0], stc.vertices, 0, 1)
     assert stc.data.shape == (len(data), 1)
 
@@ -506,14 +509,29 @@ def test_center_of_mass():
 
 
 @testing.requires_testing_data
-def test_extract_label_time_course():
-    """Test extraction of label time courses from stc."""
+@pytest.mark.parametrize('kind', ('surface', 'mixed'))
+@pytest.mark.parametrize('vector', (False, True))
+def test_extract_label_time_course(kind, vector):
+    """Test extraction of label time courses from (Mixed)SourceEstimate."""
     n_stcs = 3
     n_times = 50
 
     src = read_inverse_operator(fname_inv)['src']
-    vertices = [src[0]['vertno'], src[1]['vertno']]
-    n_verts = len(vertices[0]) + len(vertices[1])
+    if kind == 'mixed':
+        label_names = ('Left-Cerebellum-Cortex',
+                       'Right-Cerebellum-Cortex')
+        src += setup_volume_source_space(
+            'sample', pos=20., volume_label=label_names,
+            subjects_dir=subjects_dir, add_interpolator=False)
+        klass = MixedVectorSourceEstimate
+    else:
+        klass = VectorSourceEstimate
+    if not vector:
+        klass = klass._scalar_class
+    vertices = [s['vertno'] for s in src]
+    n_verts = np.array([len(v) for v in vertices])
+    vol_means = np.arange(-1, 1 - len(src), -1)
+    vol_means_t = np.repeat(vol_means[:, np.newaxis], n_times, axis=1)
 
     # get some labels
     labels_lh = read_labels_from_annot('sample', hemi='lh',
@@ -526,18 +544,21 @@ def test_extract_label_time_course():
 
     n_labels = len(labels)
 
-    label_means = np.arange(n_labels)[:, None] * np.ones((n_labels, n_times))
-    label_maxs = np.arange(n_labels)[:, None] * np.ones((n_labels, n_times))
+    label_tcs = dict(
+        mean=np.arange(n_labels)[:, None] * np.ones((n_labels, n_times)))
+    label_tcs['max'] = label_tcs['mean']
 
     # compute the mean with sign flip
-    label_means_flipped = np.zeros_like(label_means)
+    label_tcs['mean_flip'] = np.zeros_like(label_tcs['mean'])
     for i, label in enumerate(labels):
-        label_means_flipped[i] = i * np.mean(label_sign_flip(label, src))
+        label_tcs['mean_flip'][i] = i * np.mean(
+            label_sign_flip(label, src[:2]))
 
     # generate some stc's with known data
     stcs = list()
+    pad = (((0, 0), (2, 0), (0, 0)), 'constant')
     for i in range(n_stcs):
-        data = np.zeros((n_verts, n_times))
+        data = np.zeros((n_verts.sum(), n_times))
         # set the value of the stc within each label
         for j, label in enumerate(labels):
             if label.hemi == 'lh':
@@ -546,33 +567,51 @@ def test_extract_label_time_course():
             elif label.hemi == 'rh':
                 idx = np.intersect1d(vertices[1], label.vertices)
                 idx = len(vertices[0]) + np.searchsorted(vertices[1], idx)
-            data[idx] = label_means[j]
+            data[idx] = label_tcs['mean'][j]
+        for j in range(len(vol_means)):
+            offset = n_verts[:2 + j].sum()
+            data[offset:offset + n_verts[j]] = vol_means[j]
 
-        this_stc = SourceEstimate(data, vertices, 0, 1)
+        if vector:
+            # the values it on the Z axis
+            data = np.pad(data[:, np.newaxis], *pad)
+        this_stc = klass(data, vertices, 0, 1)
         stcs.append(this_stc)
 
+    if vector:
+        for key in label_tcs:
+            label_tcs[key] = np.pad(label_tcs[key][:, np.newaxis], *pad)
+        vol_means_t = np.pad(vol_means_t[:, np.newaxis], *pad)
+
     # test some invalid inputs
-    pytest.raises(ValueError, extract_label_time_course, stcs, labels,
-                  src, mode='notamode')
+    with pytest.raises(ValueError, match="Invalid value for the 'mode'"):
+        extract_label_time_course(stcs, labels, src, mode='notamode')
 
     # have an empty label
     empty_label = labels[0].copy()
     empty_label.vertices += 1000000
-    pytest.raises(ValueError, extract_label_time_course, stcs, empty_label,
-                  src, mode='mean')
+    with pytest.raises(ValueError, match='does not contain any vertices'):
+        extract_label_time_course(stcs, empty_label, src)
 
     # but this works:
     with pytest.warns(RuntimeWarning, match='does not contain any vertices'):
-        tc = extract_label_time_course(stcs, empty_label, src, mode='mean',
+        tc = extract_label_time_course(stcs, empty_label, src,
                                        allow_empty=True)
+    end_shape = (3, n_times) if vector else (n_times,)
     for arr in tc:
-        assert (arr.shape == (1, n_times))
-        assert_array_equal(arr, np.zeros((1, n_times)))
+        assert arr.shape == (1 + len(vol_means),) + end_shape
+        assert_array_equal(arr[:1], np.zeros((1,) + end_shape))
+        if len(vol_means):
+            assert_array_equal(arr[1:], vol_means_t)
 
     # test the different modes
-    modes = ['mean', 'mean_flip', 'pca_flip', 'max']
+    modes = ['mean', 'mean_flip', 'pca_flip', 'max', 'auto']
 
     for mode in modes:
+        if vector and mode not in ('mean', 'max', 'auto'):
+            with pytest.raises(ValueError, match='when using a vector'):
+                extract_label_time_course(stcs, labels, src, mode=mode)
+            continue
         label_tc = extract_label_time_course(stcs, labels, src, mode=mode)
         label_tc_method = [stc.extract_label_time_course(labels, src,
                                                          mode=mode)
@@ -580,22 +619,24 @@ def test_extract_label_time_course():
         assert (len(label_tc) == n_stcs)
         assert (len(label_tc_method) == n_stcs)
         for tc1, tc2 in zip(label_tc, label_tc_method):
-            assert (tc1.shape == (n_labels, n_times))
-            assert (tc2.shape == (n_labels, n_times))
-            assert (np.allclose(tc1, tc2, rtol=1e-8, atol=1e-16))
-            if mode == 'mean':
-                assert_array_almost_equal(tc1, label_means)
-            if mode == 'mean_flip':
-                assert_array_almost_equal(tc1, label_means_flipped)
-            if mode == 'max':
-                assert_array_almost_equal(tc1, label_maxs)
+            assert tc1.shape == (n_labels + len(vol_means),) + end_shape
+            assert tc2.shape == (n_labels + len(vol_means),) + end_shape
+            assert_allclose(tc1, tc2, rtol=1e-8, atol=1e-16)
+            if mode == 'auto':
+                use_mode = 'mean' if vector else 'mean_flip'
+            else:
+                use_mode = mode
+            # XXX we don't check pca_flip, probably should someday...
+            if use_mode in ('mean', 'max', 'mean_flip'):
+                assert_array_almost_equal(tc1[:n_labels], label_tcs[use_mode])
+            assert_array_almost_equal(tc1[n_labels:], vol_means_t)
 
     # test label with very few vertices (check SVD conditionals)
     label = Label(vertices=src[0]['vertno'][:2], hemi='lh')
-    x = label_sign_flip(label, src)
+    x = label_sign_flip(label, src[:2])
     assert (len(x) == 2)
     label = Label(vertices=[], hemi='lh')
-    x = label_sign_flip(label, src)
+    x = label_sign_flip(label, src[:2])
     assert (x.size == 0)
 
 
@@ -634,7 +675,7 @@ def test_transform_data():
     kernel = rng.randn(n_vertices, n_sensors)
     sens_data = rng.randn(n_sensors, n_times)
 
-    vertices = np.arange(n_vertices)
+    vertices = [np.arange(n_vertices)]
     data = np.dot(kernel, sens_data)
 
     for idx, tmin_idx, tmax_idx in\
@@ -658,7 +699,7 @@ def test_transform_data():
     # bad sens_data
     sens_data = sens_data[..., np.newaxis]
     with pytest.raises(ValueError, match='sensor data must have 2'):
-        VolSourceEstimate((kernel, sens_data), vertices)
+        VolSourceEstimate((kernel, sens_data), vertices, 0, 1)
 
 
 def test_transform():
@@ -775,7 +816,7 @@ def test_to_data_frame():
     data = rng.randn(n_vert, n_times)
     stc_surf = SourceEstimate(data, vertices=vertices, tmin=0, tstep=1,
                               subject='sample')
-    stc_vol = VolSourceEstimate(data, vertices=vertices[0], tmin=0, tstep=1,
+    stc_vol = VolSourceEstimate(data, vertices=vertices[:1], tmin=0, tstep=1,
                                 subject='sample')
     for stc in [stc_surf, stc_vol]:
         df = stc.to_data_frame()
@@ -815,13 +856,13 @@ def test_get_peak():
     data = rng.randn(n_vert, n_times)
     stc_surf = SourceEstimate(data, vertices=vertices, tmin=0, tstep=1,
                               subject='sample')
-    stc_vol = VolSourceEstimate(data, vertices=vertices[0], tmin=0, tstep=1,
+    stc_vol = VolSourceEstimate(data, vertices=vertices[:1], tmin=0, tstep=1,
                                 subject='sample')
 
     # Versions with only one time point
     stc_surf_1 = SourceEstimate(data[:, :1], vertices=vertices, tmin=0,
                                 tstep=1, subject='sample')
-    stc_vol_1 = VolSourceEstimate(data[:, :1], vertices=vertices[0], tmin=0,
+    stc_vol_1 = VolSourceEstimate(data[:, :1], vertices=vertices[:1], tmin=0,
                                   tstep=1, subject='sample')
 
     for ii, stc in enumerate([stc_surf, stc_vol, stc_surf_1, stc_vol_1]):
@@ -830,7 +871,7 @@ def test_get_peak():
         pytest.raises(ValueError, stc.get_peak, tmin=0.002, tmax=0.001)
 
         vert_idx, time_idx = stc.get_peak()
-        vertno = np.concatenate(stc.vertices) if ii in [0, 2] else stc.vertices
+        vertno = np.concatenate(stc.vertices)
         assert (vert_idx in vertno)
         assert (time_idx in stc.times)
 
@@ -860,7 +901,8 @@ def test_mixed_stc(tmpdir):
     vol = read_source_spaces(fname_vsrc)
 
     # make sure error is raised for plotting surface with volume source
-    pytest.raises(ValueError, stc.plot_surface, src=vol)
+    with pytest.deprecated_call(match='plot_surface'):
+        pytest.raises(ValueError, stc.plot_surface, src=vol)
 
     fname = tmpdir.join('mixed-stc.h5')
     stc.save(fname)
@@ -872,11 +914,14 @@ def test_mixed_stc(tmpdir):
     assert isinstance(stc_out, MixedSourceEstimate)
 
 
-@pytest.mark.parametrize('klass, kind',
-                         ((VectorSourceEstimate, 'surf'),
-                          (VolVectorSourceEstimate, 'vol'),
-                          (VolVectorSourceEstimate, 'discrete')))
-def test_vec_stc(klass, kind):
+@requires_h5py
+@pytest.mark.parametrize('klass, kind', [
+    (VectorSourceEstimate, 'surf'),
+    (VolVectorSourceEstimate, 'vol'),
+    (VolVectorSourceEstimate, 'discrete'),
+    (MixedVectorSourceEstimate, 'mixed'),
+])
+def test_vec_stc_basic(tmpdir, klass, kind):
     """Test (vol)vector source estimate."""
     nn = np.array([
         [1, 0, 0],
@@ -891,34 +936,137 @@ def test_vec_stc(klass, kind):
         [3, 0, 0],
         [1, 1, 1],
     ])[:, :, np.newaxis]
+    magnitudes = np.linalg.norm(data, axis=1)[:, 0]
+    normals = np.array([1, 2, 0, np.sqrt(3)])
+    vol_kind = kind if kind in ('discrete', 'vol') else 'vol'
+    vol_src = SourceSpaces([dict(nn=nn, type=vol_kind)])
+    assert vol_src.kind == dict(vol='volume').get(vol_kind, vol_kind)
+    vol_verts = [np.arange(4)]
+    surf_src = SourceSpaces([dict(nn=nn[:2], type='surf'),
+                             dict(nn=nn[2:], type='surf')])
+    assert surf_src.kind == 'surface'
+    surf_verts = [np.array([0, 1]), np.array([0, 1])]
     if klass is VolVectorSourceEstimate:
-        src = SourceSpaces([dict(nn=nn, type=kind)])
-        verts = np.arange(4)
-    else:
-        src = SourceSpaces([dict(nn=nn[:2], type=kind),
-                            dict(nn=nn[2:], type=kind)])
-        verts = [np.array([0, 1]), np.array([0, 1])]
+        src = vol_src
+        verts = vol_verts
+    elif klass is VectorSourceEstimate:
+        src = surf_src
+        verts = surf_verts
+    if klass is MixedVectorSourceEstimate:
+        src = surf_src + vol_src
+        verts = surf_verts + vol_verts
+        assert src.kind == 'mixed'
+        data = np.tile(data, (2, 1, 1))
+        magnitudes = np.tile(magnitudes, 2)
+        normals = np.tile(normals, 2)
     stc = klass(data, verts, 0, 1, 'foo')
 
     # Magnitude of the vectors
-    assert_array_equal(stc.magnitude().data[:, 0], [1, 2, 3, np.sqrt(3)])
+    assert_array_equal(stc.magnitude().data[:, 0], magnitudes)
 
     # Vector components projected onto the vertex normals
-    if kind == 'vol':
+    if kind in ('vol', 'mixed'):
         with pytest.raises(RuntimeError, match='surface or discrete'):
             stc.normal(src)
-        return
-    normal = stc.normal(src)
-    assert_array_equal(normal.data[:, 0], [1, 2, 0, np.sqrt(3)])
+    else:
+        normal = stc.normal(src)
+        assert_array_equal(normal.data[:, 0], normals)
+
+    out_name = tmpdir.join('temp.h5')
+    stc.save(out_name)
+    stc_read = read_source_estimate(out_name)
+    assert_allclose(stc.data, stc_read.data)
+    assert len(stc.vertices) == len(stc_read.vertices)
+    for v1, v2 in zip(stc.vertices, stc_read.vertices):
+        assert_array_equal(v1, v2)
 
     stc = klass(data[:, :, 0], verts, 0, 1)  # upbroadcast
     assert stc.data.shape == (len(data), 3, 1)
     # Bad data
-    with pytest.raises(ValueError, match='of length 3'):
+    with pytest.raises(ValueError, match='must have shape.*3'):
         klass(data[:, :2], verts, 0, 1)
     data = data[:, :, np.newaxis]
     with pytest.raises(ValueError, match='3 dimensions for .*VectorSource'):
         klass(data, verts, 0, 1)
+
+
+@pytest.fixture(scope='module', params=[testing._pytest_param()])
+def invs():
+    """Inverses of various amounts of loose."""
+    fwd = read_forward_solution(fname_fwd)
+    fwd = pick_types_forward(fwd, meg=True, eeg=False)
+    fwd_surf = convert_forward_solution(fwd, surf_ori=True)
+    evoked = read_evokeds(fname_evoked, baseline=(None, 0))[0]
+    noise_cov = read_cov(fname_cov)
+    free = make_inverse_operator(
+        evoked.info, fwd, noise_cov, loose=1.)
+    free_surf = make_inverse_operator(
+        evoked.info, fwd_surf, noise_cov, loose=1.)
+    freeish = make_inverse_operator(
+        evoked.info, fwd, noise_cov, loose=0.9999)
+    fixed = make_inverse_operator(
+        evoked.info, fwd, noise_cov, loose=0.)
+    fixedish = make_inverse_operator(
+        evoked.info, fwd, noise_cov, loose=0.0001)
+    assert_allclose(free['source_nn'],
+                    np.kron(np.ones(fwd['nsource']), np.eye(3)).T,
+                    atol=1e-7)
+    # This is the one exception:
+    assert not np.allclose(free['source_nn'], free_surf['source_nn'])
+    assert_allclose(free['source_nn'],
+                    np.tile(np.eye(3), (free['nsource'], 1)), atol=1e-7)
+    # All others are similar:
+    for other in (freeish, fixedish):
+        assert_allclose(free_surf['source_nn'], other['source_nn'], atol=1e-7)
+    assert_allclose(
+        free_surf['source_nn'][2::3], fixed['source_nn'], atol=1e-7)
+    expected_nn = np.concatenate([_get_src_nn(s) for s in fwd['src']])
+    assert_allclose(fixed['source_nn'], expected_nn, atol=1e-7)
+    return evoked, free, free_surf, freeish, fixed, fixedish
+
+
+bad_normal = pytest.param(
+    'normal', marks=pytest.mark.xfail(raises=AssertionError))
+
+
+@pytest.mark.parametrize('pick_ori', [None, 'normal', 'vector'])
+def test_vec_stc_inv_free(invs, pick_ori):
+    """Test vector STC behavior with two free-orientation inverses."""
+    evoked, free, free_surf, _, _, _ = invs
+    stc_free = apply_inverse(evoked, free, pick_ori=pick_ori)
+    stc_free_surf = apply_inverse(evoked, free_surf, pick_ori=pick_ori)
+    assert_allclose(stc_free.data, stc_free_surf.data, atol=1e-5)
+
+
+@pytest.mark.parametrize('pick_ori', [None, 'normal', 'vector'])
+def test_vec_stc_inv_free_surf(invs, pick_ori):
+    """Test vector STC behavior with free and free-ish orientation invs."""
+    evoked, _, free_surf, freeish, _, _ = invs
+    stc_free = apply_inverse(evoked, free_surf, pick_ori=pick_ori)
+    stc_freeish = apply_inverse(evoked, freeish, pick_ori=pick_ori)
+    assert_allclose(stc_free.data, stc_freeish.data, atol=1e-3)
+
+
+@pytest.mark.parametrize('pick_ori', (None, 'normal', 'vector'))
+def test_vec_stc_inv_fixed(invs, pick_ori):
+    """Test vector STC behavior with fixed-orientation inverses."""
+    evoked, _, _, _, fixed, fixedish = invs
+    stc_fixed = apply_inverse(evoked, fixed)
+    stc_fixed_vector = apply_inverse(evoked, fixed, pick_ori='vector')
+    assert_allclose(stc_fixed.data, stc_fixed_vector.normal(fixed['src']).data)
+    stc_fixedish = apply_inverse(evoked, fixedish, pick_ori=pick_ori)
+    if pick_ori == 'vector':
+        assert_allclose(stc_fixed_vector.data, stc_fixedish.data, atol=1e-2)
+        # two ways here: with magnitude...
+        assert_allclose(
+            abs(stc_fixed).data, stc_fixedish.magnitude().data, atol=1e-2)
+        # ... and when picking the normal (signed)
+        stc_fixedish = stc_fixedish.normal(fixedish['src'])
+    elif pick_ori is None:
+        stc_fixed = abs(stc_fixed)
+    else:
+        assert pick_ori == 'normal'  # no need to modify
+    assert_allclose(stc_fixed.data, stc_fixedish.data, atol=1e-2)
 
 
 @testing.requires_testing_data
@@ -1005,8 +1153,8 @@ def test_vol_mask():
     src = read_source_spaces(fname_vsrc)
     mask = _get_vol_mask(src)
     # Let's use an alternative way that should be equivalent
-    vertices = src[0]['vertno']
-    n_vertices = len(vertices)
+    vertices = [src[0]['vertno']]
+    n_vertices = len(vertices[0])
     data = (1 + np.arange(n_vertices))[:, np.newaxis]
     stc_tmp = VolSourceEstimate(data, vertices, tmin=0., tstep=1.)
     img = stc_tmp.as_volume(src, mri_resolution=False)

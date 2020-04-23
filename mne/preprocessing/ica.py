@@ -26,7 +26,7 @@ from .infomax_ import infomax
 from ..cov import compute_whitener
 from .. import Covariance, Evoked
 from ..io.pick import (pick_types, pick_channels, pick_info,
-                       _picks_to_idx, _DATA_CH_TYPES_SPLIT)
+                       _picks_to_idx, _get_channel_types, _DATA_CH_TYPES_SPLIT)
 from ..io.write import (write_double_matrix, write_string,
                         write_name_list, write_int, start_block,
                         end_block)
@@ -51,17 +51,17 @@ from ..utils import (check_version, logger, check_fname, verbose,
                      compute_corr, _get_inst_data, _ensure_int,
                      copy_function_doc_to_method_doc, _pl, warn, Bunch,
                      _check_preload, _check_compensation_grade, fill_doc,
-                     _check_option, _PCA, deprecated)
+                     _check_option, _PCA)
 from ..utils.check import _check_all_same_channel_names
 
 from ..fixes import _get_args, _safe_svd
 from ..filter import filter_data
-from .bads import find_outliers
+from .bads import _find_outliers
 from .ctps_ import ctps
-from ..io.pick import channel_type, pick_channels_regexp
+from ..io.pick import pick_channels_regexp
 
 __all__ = ('ICA', 'ica_find_ecg_events', 'ica_find_eog_events',
-           'get_score_funcs', 'read_ica', 'run_ica', 'read_ica_eeglab')
+           'get_score_funcs', 'read_ica', 'read_ica_eeglab')
 
 
 def _make_xy_sfunc(func, ndim_output=False):
@@ -112,7 +112,7 @@ def _check_for_unsupported_ica_channels(picks, info, allow_ref_meg=False):
     """
     types = _DATA_CH_TYPES_SPLIT + ('eog',)
     types += ('ref_meg',) if allow_ref_meg else ()
-    chs = list({channel_type(info, j) for j in picks})
+    chs = _get_channel_types(info, picks, unique=True, only_data_chs=False)
     check = all([ch in types for ch in chs])
     if not check:
         raise ValueError('Invalid channel type%s passed for ICA: %s.'
@@ -247,7 +247,7 @@ class ICA(ContainsMixin):
 
     Prior to fitting and applying the ICA, data is whitened (de-correlated and
     scaled to unit variance, also called sphering transformation) by means of
-    a Principle Component Analysis (PCA). In addition to the whitening, this
+    a Principal Component Analysis (PCA). In addition to the whitening, this
     step introduces the option to reduce the dimensionality of the data, both
     prior to fitting the ICA (with the ``max_pca_components`` parameter) and
     prior to reconstructing the sensor signals (with the ``n_pca_components``
@@ -342,9 +342,9 @@ class ICA(ContainsMixin):
         _validate_type(method, str, 'method')
         if method != 'imported_eeglab':  # internal use only
             _check_option('method', method, ['fastica', 'infomax', 'picard'])
-        if method == 'fastica' and not check_version('sklearn', '0.15'):
-            raise RuntimeError('The scikit-learn package (version >= 0.15) '
-                               'is required for FastICA.')
+        if method == 'fastica' and not check_version('sklearn'):
+            raise RuntimeError(
+                'The scikit-learn package is required for FastICA.')
 
         self.noise_cov = noise_cov
 
@@ -1087,7 +1087,7 @@ class ICA(ContainsMixin):
                 stop=stop, l_freq=l_freq, h_freq=h_freq,
                 reject_by_annotation=reject_by_annotation)]
             # pick last scores
-            this_idx = find_outliers(scores[-1], threshold=threshold)
+            this_idx = _find_outliers(scores[-1], threshold=threshold)
             idx += [this_idx]
             self.labels_['%s/%i/' % (prefix, ii) + ch] = list(this_idx)
 
@@ -1554,7 +1554,7 @@ class ICA(ContainsMixin):
         return data
 
     @verbose
-    def save(self, fname):
+    def save(self, fname, verbose=None):
         """Store ICA solution into a fiff file.
 
         Parameters
@@ -1562,6 +1562,7 @@ class ICA(ContainsMixin):
         fname : str
             The absolute path of the file name to save the ICA solution into.
             The file name should end with -ica.fif or -ica.fif.gz.
+        %(verbose_meth)s
 
         Returns
         -------
@@ -1602,21 +1603,20 @@ class ICA(ContainsMixin):
         return deepcopy(self)
 
     @copy_function_doc_to_method_doc(plot_ica_components)
-    def plot_components(self, picks=None, ch_type=None, res=64, layout=None,
+    def plot_components(self, picks=None, ch_type=None, res=64,
                         vmin=None, vmax=None, cmap='RdBu_r', sensors=True,
                         colorbar=False, title=None, show=True, outlines='head',
-                        contours=6, image_interp='bilinear', head_pos=None,
+                        contours=6, image_interp='bilinear',
                         inst=None, plot_std=True, topomap_args=None,
                         image_args=None, psd_args=None, reject='auto',
                         sphere=None):
         return plot_ica_components(self, picks=picks, ch_type=ch_type,
-                                   res=res, layout=layout, vmin=vmin,
+                                   res=res, vmin=vmin,
                                    vmax=vmax, cmap=cmap, sensors=sensors,
                                    colorbar=colorbar, title=title, show=show,
                                    outlines=outlines, contours=contours,
                                    image_interp=image_interp,
-                                   head_pos=head_pos, inst=inst,
-                                   plot_std=plot_std,
+                                   inst=inst, plot_std=plot_std,
                                    topomap_args=topomap_args,
                                    image_args=image_args, psd_args=psd_args,
                                    reject=reject, sphere=sphere)
@@ -2255,172 +2255,6 @@ def _detect_artifacts(ica, raw, start_find, stop_find, ecg_ch, ecg_score_func,
     logger.info('Ready.')
 
 
-@deprecated('run_ica() is deprecated and will be removed in 0.21, use '
-            'ICA.detect_artifacts() instead')
-@verbose
-def run_ica(raw, n_components, max_pca_components=100,
-            n_pca_components=64, noise_cov=None,
-            random_state=None, picks=None, start=None, stop=None,
-            start_find=None, stop_find=None, ecg_ch=None,
-            ecg_score_func='pearsonr', ecg_criterion=0.1, eog_ch=None,
-            eog_score_func='pearsonr', eog_criterion=0.1, skew_criterion=0,
-            kurt_criterion=0, var_criterion=-1, add_nodes=None,
-            method='fastica', allow_ref_meg=False, verbose=None):
-    """Run ICA decomposition on raw data and identify artifact sources.
-
-    This function implements an automated artifact removal work flow.
-
-    Hints and caveats:
-
-        - It is highly recommended to bandpass filter ECG and EOG
-          data and pass them instead of the channel names as ecg_ch and eog_ch
-          arguments.
-        - Please check your results. Detection by kurtosis and variance
-          can be powerful but misclassification of brain signals as
-          noise cannot be precluded. If you are not sure set those to None.
-        - Consider using shorter times for start_find and stop_find than
-          for start and stop. It can save you much time.
-
-    Example invocation (taking advantage of defaults)::
-
-        ica = run_ica(raw, n_components=.9, start_find=10000, stop_find=12000,
-                      ecg_ch='MEG 1531', eog_ch='EOG 061')
-
-    Parameters
-    ----------
-    raw : instance of Raw
-        The raw data to decompose.
-    n_components : int | float | None
-        The number of components used for ICA decomposition. If int, it must be
-        smaller then max_pca_components. If None, all PCA components will be
-        used. If float between 0 and 1 components can will be selected by the
-        cumulative percentage of explained variance.
-    max_pca_components : int | None
-        The number of components used for PCA decomposition. If None, no
-        dimension reduction will be applied and max_pca_components will equal
-        the number of channels supplied on decomposing data.
-    n_pca_components
-        The number of PCA components used after ICA recomposition. The ensuing
-        attribute allows to balance noise reduction against potential loss of
-        features due to dimensionality reduction. If greater than
-        ``self.n_components_``, the next ``'n_pca_components'`` minus
-        ``'n_components_'`` PCA components will be added before restoring the
-        sensor space data. The attribute gets updated each time the according
-        parameter for in .pick_sources_raw or .pick_sources_epochs is changed.
-    noise_cov : None | instance of Covariance
-        Noise covariance used for whitening. If None, channels are just
-        z-scored.
-    %(random_state)s
-        Random state to initialize the FastICA estimation. As the estimation is
-        non-deterministic it can be useful to fix the random state to have
-        reproducible results.
-    %(picks_good_data_noref)s
-        This selection remains throughout the initialized ICA solution.
-    start : int | float | None
-        First sample to include for decomposition. If float, data will be
-        interpreted as time in seconds. If None, data will be used from the
-        first sample.
-    stop : int | float | None
-        Last sample to not include for decomposition. If float, data will be
-        interpreted as time in seconds. If None, data will be used to the
-        last sample.
-    start_find : int | float | None
-        First sample to include for artifact search. If float, data will be
-        interpreted as time in seconds. If None, data will be used from the
-        first sample.
-    stop_find : int | float | None
-        Last sample to not include for artifact search. If float, data will be
-        interpreted as time in seconds. If None, data will be used to the last
-        sample.
-    ecg_ch : str | ndarray | None
-        The ``target`` argument passed to ica.find_sources_raw. Either the
-        name of the ECG channel or the ECG time series. If None, this step
-        will be skipped.
-    ecg_score_func : str | callable
-        The ``score_func`` argument passed to ica.find_sources_raw. Either
-        the name of function supported by ICA or a custom function.
-    ecg_criterion : float | int | list-like | slice
-        The indices of the sorted ecg scores. If float, sources with
-        absolute scores greater than the criterion will be dropped. Else, the
-        absolute scores sorted in descending order will be indexed accordingly.
-        E.g. range(2) would return the two sources with the highest absolute
-        score. If None, this step will be skipped.
-    eog_ch : list | str | ndarray | None
-        The ``target`` argument or the list of target arguments subsequently
-        passed to ica.find_sources_raw. Either the name of the vertical EOG
-        channel or the corresponding EOG time series. If None, this step
-        will be skipped.
-    eog_score_func : str | callable
-        The ``score_func`` argument passed to ica.find_sources_raw. Either
-        the name of function supported by ICA or a custom function.
-    eog_criterion : float | int | list-like | slice
-        The indices of the sorted eog scores. If float, sources with
-        absolute scores greater than the criterion will be dropped. Else, the
-        absolute scores sorted in descending order will be indexed accordingly.
-        E.g. range(2) would return the two sources with the highest absolute
-        score. If None, this step will be skipped.
-    skew_criterion : float | int | list-like | slice
-        The indices of the sorted skewness scores. If float, sources with
-        absolute scores greater than the criterion will be dropped. Else, the
-        absolute scores sorted in descending order will be indexed accordingly.
-        E.g. range(2) would return the two sources with the highest absolute
-        score. If None, this step will be skipped.
-    kurt_criterion : float | int | list-like | slice
-        The indices of the sorted kurtosis scores. If float, sources with
-        absolute scores greater than the criterion will be dropped. Else, the
-        absolute scores sorted in descending order will be indexed accordingly.
-        E.g. range(2) would return the two sources with the highest absolute
-        score. If None, this step will be skipped.
-    var_criterion : float | int | list-like | slice
-        The indices of the sorted variance scores. If float, sources with
-        absolute scores greater than the criterion will be dropped. Else, the
-        absolute scores sorted in descending order will be indexed accordingly.
-        E.g. range(2) would return the two sources with the highest absolute
-        score. If None, this step will be skipped.
-    add_nodes : list of tuple
-        Additional list if tuples carrying the following parameters:
-        (name : str, target : str | array, score_func : callable,
-        criterion : float | int | list-like | slice). This parameter is a
-        generalization of the artifact specific parameters above and has
-        the same structure. Example::
-
-            add_nodes=('ECG phase lock', ECG 01', my_phase_lock_function, 0.5)
-
-    method : {'fastica', 'infomax', 'extended-infomax', 'picard'}
-        The ICA method to use in the fit() method. Defaults to 'fastica'.
-    allow_ref_meg : bool
-        Allow ICA on MEG reference channels. Defaults to False.
-
-        .. versionadded:: 0.18
-    %(verbose)s
-
-    Returns
-    -------
-    ica : instance of ICA
-        The ICA object with detected artifact sources marked for exclusion.
-    """
-    ica = ICA(n_components=n_components, max_pca_components=max_pca_components,
-              n_pca_components=n_pca_components, method=method,
-              noise_cov=noise_cov, random_state=random_state, verbose=verbose,
-              allow_ref_meg=allow_ref_meg)
-
-    ica.fit(raw, start=start, stop=stop, picks=picks)
-    logger.info('%s' % ica)
-    logger.info('    Now searching for artifacts...')
-
-    _detect_artifacts(ica=ica, raw=raw, start_find=start_find,
-                      stop_find=stop_find, ecg_ch=ecg_ch,
-                      ecg_score_func=ecg_score_func,
-                      ecg_criterion=ecg_criterion, eog_ch=eog_ch,
-                      eog_score_func=eog_score_func,
-                      eog_criterion=eog_criterion,
-                      skew_criterion=skew_criterion,
-                      kurt_criterion=kurt_criterion,
-                      var_criterion=var_criterion,
-                      add_nodes=add_nodes)
-    return ica
-
-
 @verbose
 def _band_pass_filter(inst, sources, target, l_freq, h_freq, verbose=None):
     """Optionally band-pass filter the data."""
@@ -2452,7 +2286,7 @@ def _find_max_corrs(all_maps, target, threshold):
         max_corrs = [list(np.nonzero(s_corr > threshold)[0])
                      for s_corr in abs_corrs]
     else:
-        max_corrs = [list(find_outliers(s_corr, threshold=threshold))
+        max_corrs = [list(_find_outliers(s_corr, threshold=threshold))
                      for s_corr in abs_corrs]
 
     am = [l[i] for l, i_s in zip(abs_corrs, max_corrs)
@@ -2483,7 +2317,7 @@ def _find_max_corrs(all_maps, target, threshold):
 
 @verbose
 def corrmap(icas, template, threshold="auto", label=None, ch_type="eeg",
-            plot=True, show=True, outlines='head', layout=None,
+            plot=True, show=True, outlines='head',
             sensors=True, contours=6, cmap=None, sphere=None, verbose=None):
     """Find similar Independent Components across subjects by map similarity.
 
@@ -2526,7 +2360,7 @@ def corrmap(icas, template, threshold="auto", label=None, ch_type="eeg",
         If list of floats, search for the best map in the specified range of
         correlation strengths. As correlation values, must be between 0 and 1
         If float > 0, select ICs correlating better than this.
-        If float > 1, use find_outliers to identify ICs within subjects (not in
+        If float > 1, use z-scoring to identify ICs within subjects (not in
         original Corrmap)
         Defaults to "auto".
     label : None | str
@@ -2542,7 +2376,6 @@ def corrmap(icas, template, threshold="auto", label=None, ch_type="eeg",
     show : bool
         Show figures if True.
     %(topomap_outlines)s
-    %(layout_dep)s
     sensors : bool | str
         Add markers for sensor locations to the plot. Accepts matplotlib plot
         format string (e.g., 'r+' for red plusses). If True, a circle will be
@@ -2600,13 +2433,13 @@ def corrmap(icas, template, threshold="auto", label=None, ch_type="eeg",
             ttl = 'Template from subj. {}'.format(str(template[0]))
             template_fig = icas[template[0]].plot_components(
                 picks=template[1], ch_type=ch_type, title=ttl,
-                outlines=outlines, cmap=cmap, contours=contours, layout=layout,
+                outlines=outlines, cmap=cmap, contours=contours,
                 show=show, topomap_args=dict(sphere=sphere))
         else:  # plotting an array
             template_fig = _plot_corrmap([template], [0], [0], ch_type,
                                          icas[0].copy(), "Template",
                                          outlines=outlines, cmap=cmap,
-                                         contours=contours, layout=layout,
+                                         contours=contours,
                                          show=show, template=True,
                                          sphere=sphere)
         template_fig.subplots_adjust(top=0.8)
@@ -2614,8 +2447,8 @@ def corrmap(icas, template, threshold="auto", label=None, ch_type="eeg",
 
     # first run: use user-selected map
     threshold = np.atleast_1d(np.array(threshold, float)).ravel()
-    threshold_err = ('No component detected using find_outliers when '
-                     'using threshold%s %s, consider using a more lenient '
+    threshold_err = ('No component detected using when z-scoring '
+                     'threshold%s %s, consider using a more lenient '
                      'threshold' % (threshold_extra, threshold))
     if len(all_maps) == 0:
         raise RuntimeError(threshold_err)
@@ -2664,7 +2497,7 @@ def corrmap(icas, template, threshold="auto", label=None, ch_type="eeg",
     if plot is True:
         labelled_ics = _plot_corrmap(allmaps, subjs, indices, ch_type, ica,
                                      label, outlines=outlines, cmap=cmap,
-                                     contours=contours, layout=layout,
+                                     contours=contours,
                                      show=show, sphere=sphere)
         return template_fig, labelled_ics
     else:

@@ -19,7 +19,8 @@ from .source_space import SourceSpaces, _ensure_src
 from .surface import read_morph_map, mesh_edges, read_surface, _compute_nearest
 from .utils import (logger, verbose, check_version, get_subjects_dir,
                     warn as warn_, fill_doc, _check_option, _validate_type,
-                    BunchConst, wrapped_stdout, _check_fname, warn)
+                    BunchConst, wrapped_stdout, _check_fname, warn,
+                    _ensure_int)
 from .externals.h5io import read_hdf5, write_hdf5
 
 
@@ -75,10 +76,14 @@ def compute_source_morph(src, subject_from=None, subject_to='fsaverage',
         If None, all vertices will be used (potentially filling the
         surface). If a list, then values will be morphed to the set of
         vertices specified in in ``spacing[0]`` and ``spacing[1]``.
-    smooth : int | None
+    smooth : int | str | None
         Number of iterations for the smoothing of the surface data.
         If None, smooth is automatically defined to fill the surface
-        with non-zero values. The default is spacing=None.
+        with non-zero values. Can also be ``'nearest'`` to use the nearest
+        vertices on the surface (requires SciPy >= 1.3).
+
+        .. versionchanged:: 0.20
+           Added support for 'nearest'.
     warn : bool
         If True, warn if not all vertices were used. The default is warn=True.
     xhemi : bool
@@ -194,7 +199,7 @@ def compute_source_morph(src, subject_from=None, subject_to='fsaverage',
             src_data['to_vox_map'] = (
                 src_to[0]['shape'], src_to[0]['src_mri_t']['trans'] *
                 np.array([[1e3, 1e3, 1e3, 1]]).T)
-            vertices_to = src_to[0]['vertno']
+            vertices_to = [src_to[0]['vertno']]
             zooms_src_to = np.diag(src_data['to_vox_map'][1])[:3]
             assert (zooms_src_to[0] == zooms_src_to).all()
             zooms_src_to = tuple(zooms_src_to)
@@ -296,10 +301,8 @@ class SourceMorph(object):
         transform [2]_.
     spacing : int | list | None
         See :func:`mne.compute_source_morph`.
-    smooth : int | None
-        Number of iterations for the smoothing of the surface data.
-        If None, smooth is automatically defined to fill the surface
-        with non-zero values.
+    smooth : int | str | None
+        See :func:`mne.compute_source_morph`.
     xhemi : bool
         Morph across hemisphere.
     morph_mat : scipy.sparse.csr_matrix
@@ -369,8 +372,8 @@ class SourceMorph(object):
     def _get_vertices_nz(self, vertices_from):
         logger.info('Computing nonzero vertices after morph ...')
         stc_ones = VolSourceEstimate(np.ones((len(vertices_from), 1)),
-                                     vertices_from, tmin=0., tstep=1.)
-        return np.where(self._morph_one_vol(stc_ones))[0]
+                                     [vertices_from], tmin=0., tstep=1.)
+        return [np.where(self._morph_one_vol(stc_ones))[0]]
 
     @verbose
     def apply(self, stc_from, output='stc', mri_resolution=False,
@@ -564,6 +567,9 @@ def read_source_morph(fname):
         morph = vals['sdr_morph']
         vals['sdr_morph'] = DiffeomorphicMap(None, [])
         vals['sdr_morph'].__dict__ = morph
+    # Backward compat with when it used to be a list
+    if isinstance(vals['vertices_to'], np.ndarray):
+        vals['vertices_to'] = [vals['vertices_to']]
     return SourceMorph(**vals)
 
 
@@ -617,7 +623,7 @@ def _morphed_stc_as_volume(morph, stc, mri_resolution, mri_space, output):
     assert stc.data.ndim == 2
     n_times = stc.data.shape[1]
     img = np.zeros((np.prod(shape), n_times))
-    img[stc.vertices, :] = stc.data
+    img[stc.vertices[0], :] = stc.data
     img = img.reshape(shape + (n_times,), order='F')  # match order='F' above
     del shape
 
@@ -888,21 +894,9 @@ def _compute_morph_matrix(subject_from, subject_to, vertices_from, vertices_to,
     morpher = []
     for hemi_to in range(2):  # iterate over to / block-rows of CSR matrix
         hemi_from = (1 - hemi_to) if xhemi else hemi_to
-        idx_use = vertices_from[hemi_from]
-        if len(idx_use) == 0:
-            morpher.append(
-                sparse.csr_matrix((len(vertices_to[hemi_to]), 0)))
-            continue
-        e = mesh_edges(tris[hemi_from])
-        e.data[e.data == 2] = 1
-        n_vertices = e.shape[0]
-        e = e + sparse.eye(n_vertices, n_vertices)
-        m = sparse.eye(len(idx_use), len(idx_use), format='csr')
-        mm = _morph_buffer(m, idx_use, e, smooth, n_vertices,
-                           vertices_to[hemi_to], maps[hemi_from], warn=warn)
-        assert mm.shape == (len(vertices_to[hemi_to]),
-                            len(vertices_from[hemi_from]))
-        morpher.append(mm)
+        morpher.append(_hemi_morph(
+            tris[hemi_from], vertices_to[hemi_to], vertices_from[hemi_from],
+            smooth, maps[hemi_from], warn))
 
     shape = (sum(len(v) for v in vertices_to),
              sum(len(v) for v in vertices_from))
@@ -922,6 +916,20 @@ def _compute_morph_matrix(subject_from, subject_to, vertices_from, vertices_to,
     morpher = sparse.csr_matrix((data, indices, indptr), shape=shape)
     logger.info('[done]')
     return morpher
+
+
+def _hemi_morph(tris, vertices_to, vertices_from, smooth, maps, warn):
+    if len(vertices_from) == 0:
+        return sparse.csr_matrix((len(vertices_to), 0))
+    e = mesh_edges(tris)
+    e.data[e.data == 2] = 1
+    n_vertices = e.shape[0]
+    e = e + sparse.eye(n_vertices)
+    m = sparse.eye(len(vertices_from), format='csr')
+    mm = _morph_buffer(m, vertices_from, e, smooth, n_vertices,
+                       vertices_to, maps, warn=warn)
+    assert mm.shape == (len(vertices_to), len(vertices_from))
+    return mm
 
 
 @verbose
@@ -952,6 +960,7 @@ def grade_to_vertices(subject, grade, subjects_dir=None, n_jobs=1,
     vertices : list of array of int
         Vertex numbers for LH and RH.
     """
+    _validate_type(grade, (list, 'int-like', None), 'grade')
     # add special case for fsaverage for speed
     if subject == 'fsaverage' and isinstance(grade, int) and grade == 5:
         return [np.arange(10242), np.arange(10242)]
@@ -968,6 +977,7 @@ def grade_to_vertices(subject, grade, subjects_dir=None, n_jobs=1,
                                  '(arrays of output vertices)')
             vertices = grade
         else:
+            grade = _ensure_int(grade)
             # find which vertices to use in "to mesh"
             ico = _get_ico_tris(grade, return_surf=True)
             lhs /= np.sqrt(np.sum(lhs ** 2, axis=1))[:, None]
@@ -994,6 +1004,27 @@ def grade_to_vertices(subject, grade, subjects_dir=None, n_jobs=1,
         vertices = [np.arange(lhs.shape[0]), np.arange(rhs.shape[0])]
 
     return vertices
+
+
+def _surf_nearest(vertices, adj_mat):
+    from scipy.sparse.csgraph import dijkstra
+    if not check_version('scipy', '1.3'):
+        raise ValueError('scipy >= 1.3 is required to use nearest smoothing, '
+                         'consider upgrading SciPy or using a different '
+                         'smoothing value')
+    # Vertices can be out of order, so sort them to start ...
+    order = np.argsort(vertices)
+    vertices = vertices[order]
+    _, _, sources = dijkstra(adj_mat, False, indices=vertices, min_only=True,
+                             return_predecessors=True)
+    col = np.searchsorted(vertices, sources)
+    # ... then get things back to the correct configuration.
+    col = order[col]
+    row = np.arange(len(col))
+    data = np.ones(len(col))
+    mat = sparse.coo_matrix((data, (row, col)))
+    assert mat.shape == (adj_mat.shape[0], len(vertices)), mat.shape
+    return mat
 
 
 def _morph_buffer(data, idx_use, e, smooth, n_vertices, nearest, maps,
@@ -1038,7 +1069,14 @@ def _morph_buffer(data, idx_use, e, smooth, n_vertices, nearest, maps,
         return data_morphed
 
     n_iter = 99  # max nb of smoothing iterations (minus one)
+    _validate_type(smooth, ('int-like', str, None), 'smooth')
+    if isinstance(smooth, str):
+        _check_option('smooth', smooth, ('nearest',),
+                      extra=' when used as a string.')
     if smooth is not None:
+        if smooth == 'nearest':
+            return (maps[nearest, :] * _surf_nearest(idx_use, e)) * data
+        smooth = _ensure_int(smooth)
         if smooth <= 0:
             raise ValueError('The number of smoothing operations ("smooth") '
                              'has to be at least 1.')
@@ -1180,17 +1218,18 @@ def _apply_morph_data(morph, stc_from):
             raise ValueError('stc_from was type %s but must be a volume '
                              'source estimate' % (type(stc_from),))
         vertices_from = np.where(morph.src_data['inuse'])[0]
-        _check_vertices_match(stc_from.vertices, vertices_from, 'volume')
+        _check_vertices_match(
+            vertices_from, stc_from.vertices[0], 'volume')
         n_times = np.prod(stc_from.data.shape[1:])
-        data = np.empty((len(morph.vertices_to), n_times))
+        data = np.empty((len(morph.vertices_to[0]), n_times))
         data_from = np.reshape(stc_from.data, (stc_from.data.shape[0], -1))
         # Loop over time points to save memory
         for k in range(n_times):
             this_stc = VolSourceEstimate(
                 data_from[:, k:k + 1], stc_from.vertices, tmin=0., tstep=1.)
             this_img_to = morph._morph_one_vol(this_stc)
-            data[:, k] = this_img_to[morph.vertices_to]
-        data.shape = (len(morph.vertices_to),) + stc_from.data.shape[1:]
+            data[:, k] = this_img_to[morph.vertices_to[0]]
+        data.shape = (len(morph.vertices_to[0]),) + stc_from.data.shape[1:]
     else:
         assert morph.kind == 'surface'
         if not isinstance(stc_from, (SourceEstimate, VectorSourceEstimate)):

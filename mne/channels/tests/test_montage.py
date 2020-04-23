@@ -19,14 +19,14 @@ from numpy.testing import (assert_array_equal,
 from mne import __file__ as _mne_file, create_info, read_evokeds
 from mne.utils._testing import _dig_sort_key
 from mne.channels import (get_builtin_montages, DigMontage, read_dig_dat,
-                          read_dig_egi, read_dig_captrack, read_dig_fif,
+                          read_dig_egi, read_dig_captrak, read_dig_fif,
+                          read_dig_captrack,  # XXX: remove with 0.22
                           make_standard_montage, read_custom_montage,
                           compute_dev_head_t, make_dig_montage,
                           read_dig_polhemus_isotrak,
                           read_polhemus_fastscan,
                           read_dig_hpts)
-from mne.channels.montage import (_set_montage, transform_to_head,
-                                  _check_get_coord_frame)
+from mne.channels.montage import transform_to_head, _check_get_coord_frame
 from mne.utils import _TempDir, run_tests_if_main, assert_dig_allclose
 from mne.bem import _fit_sphere
 from mne.io.constants import FIFF
@@ -837,9 +837,9 @@ def _pop_montage(dig_montage, ch_name):
 
 
 @testing.requires_testing_data
-def test_read_dig_captrack(tmpdir):
-    """Test reading a captrack montage file."""
-    EXPECTED_CH_NAMES = [
+def test_read_dig_captrak(tmpdir):
+    """Test reading a captrak montage file."""
+    EXPECTED_CH_NAMES_OLD = [
         'AF3', 'AF4', 'AF7', 'AF8', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'CP1',
         'CP2', 'CP3', 'CP4', 'CP5', 'CP6', 'CPz', 'Cz', 'F1', 'F2', 'F3', 'F4',
         'F5', 'F6', 'F7', 'F8', 'FC1', 'FC2', 'FC3', 'FC4', 'FC5', 'FC6',
@@ -848,9 +848,27 @@ def test_read_dig_captrack(tmpdir):
         'PO4', 'PO7', 'PO8', 'PO9', 'POz', 'Pz', 'REF', 'T7', 'T8', 'TP10',
         'TP7', 'TP8', 'TP9'
     ]
-    montage = read_dig_captrack(
+    EXPECTED_CH_NAMES = [
+        'T7', 'FC5', 'F7', 'C5', 'FT7', 'FT9', 'TP7', 'TP9', 'P7', 'CP5',
+        'PO7', 'C3', 'CP3', 'P5', 'P3', 'PO3', 'PO9', 'O1', 'Oz', 'POz', 'O2',
+        'PO4', 'P1', 'Pz', 'P2', 'CP2', 'CP1', 'CPz', 'Cz', 'C1', 'FC1', 'FC3',
+        'REF', 'F3', 'F1', 'Fz', 'F5', 'AF7', 'AF3', 'Fp1', 'GND', 'F2', 'AF4',
+        'Fp2', 'F4', 'F8', 'F6', 'AF8', 'FC2', 'FC6', 'FC4', 'C2', 'C4', 'P4',
+        'CP4', 'PO8', 'P8', 'P6', 'CP6', 'PO10', 'TP10', 'TP8', 'FT10', 'T8',
+        'C6', 'FT8'
+    ]
+    assert set(EXPECTED_CH_NAMES) == set(EXPECTED_CH_NAMES_OLD)
+    montage = read_dig_captrak(
         fname=op.join(data_path, 'montage', 'captrak_coords.bvct')
     )
+
+    # XXX: remove with 0.22 once captrCK is deprecated
+    with pytest.warns(DeprecationWarning,
+                      match='read_dig_captrack is deprecated'):
+        montage2 = read_dig_captrack(
+            fname=op.join(data_path, 'montage', 'captrak_coords.bvct')
+        )
+        assert repr(montage) == repr(montage2)
 
     assert montage.ch_names == EXPECTED_CH_NAMES
     assert repr(montage) == (
@@ -1149,29 +1167,42 @@ def test_set_montage_coord_frame_in_head_vs_unknown():
     )
 
 
-def test_set_dig_montage_parameters_deprecation():
-    """Test parameter deprecation for set_montage."""
-    # XXX: This is testing deprecated behavior and should be removed in 0.21.
-    N_CHANNELS = 3
+def test_set_montage_with_missing_coordinates():
+    """Test set montage with missing coordinates."""
+    N_CHANNELS, NaN = 3, np.nan
+
     raw = _make_toy_raw(N_CHANNELS)
-    montage = _make_toy_dig_montage(N_CHANNELS, coord_frame='head')
+    raw.set_channel_types({ch: 'ecog' for ch in raw.ch_names})
+    # don't include all the channels
+    ch_names = raw.ch_names[1:]
+    n_channels = len(ch_names)
+    ch_coords = np.arange(n_channels * 3).reshape(n_channels, 3)
+    montage_in_mri = make_dig_montage(
+        ch_pos=dict(zip(ch_names, ch_coords,)),
+        coord_frame='unknown',
+        nasion=[0, 1, 0], lpa=[1, 0, 0], rpa=[-1, 0, 0],
+    )
 
-    # ok
-    raw.set_montage(montage)
+    with pytest.raises(ValueError, match='DigMontage is '
+                                         'only a subset of info'):
+        raw.set_montage(montage_in_mri)
 
-    with pytest.deprecated_call():
-        raw.set_montage(montage, raise_if_subset=True)
+    with pytest.raises(ValueError, match='Invalid value'):
+        raw.set_montage(montage_in_mri, on_missing=True)
 
-    _msg = 'since 0.20 its value can only be True.'
-    with pytest.raises(ValueError, match=_msg):
-        raw.set_montage(montage, raise_if_subset=False)
+    with pytest.warns(RuntimeWarning, match='DigMontage is '
+                                            'only a subset of info'):
+        raw.set_montage(montage_in_mri, on_missing='warn')
 
-    # Already deleted parameters in 0.20, just for completeness
-    with pytest.raises(TypeError, match='unexpected keyword argument'):
-        raw.set_montage(montage, set_dig=True)
-
-    with pytest.raises(TypeError, match='unexpected keyword argument'):
-        _set_montage(raw.info, montage, update_ch_names=False)
+    raw.set_montage(montage_in_mri, on_missing='ignore')
+    assert_allclose(
+        actual=np.array([ch['loc'] for ch in raw.info['chs']]),
+        desired=[
+            [NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN],
+            [0., 1., -2., 0., 0., 0., NaN, NaN, NaN, NaN, NaN, NaN],
+            [-3., 4., -5., 0., 0., 0., NaN, NaN, NaN, NaN, NaN, NaN],
+        ]
+    )
 
 
 def test_read_dig_hpts():

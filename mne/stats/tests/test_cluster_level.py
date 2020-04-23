@@ -20,7 +20,8 @@ from mne.stats.cluster_level import (permutation_cluster_test, f_oneway,
                                      spatio_temporal_cluster_test,
                                      spatio_temporal_cluster_1samp_test,
                                      ttest_1samp_no_p, summarize_clusters_stc)
-from mne.utils import run_tests_if_main, catch_logging, check_version
+from mne.utils import (run_tests_if_main, catch_logging, check_version,
+                       requires_sklearn)
 
 
 @pytest.fixture(scope="function", params=('Numba', 'NumPy'))
@@ -75,8 +76,8 @@ def test_thresholds(numba_conditional):
     my_fun = partial(ttest_1samp_no_p)
     with catch_logging() as log:
         with pytest.warns(RuntimeWarning, match='threshold is only valid'):
-            out = permutation_cluster_1samp_test(X, stat_fun=my_fun,
-                                                 seed=0, verbose=True)
+            out = permutation_cluster_1samp_test(
+                X, stat_fun=my_fun, seed=0, verbose=True)
     log = log.getvalue()
     assert str(want_thresh)[:6] in log
     assert len(out[1]) == 1  # 1 cluster
@@ -99,6 +100,21 @@ def test_thresholds(numba_conditional):
     assert_allclose(out[2], 0.041992, atol=1e-6)
     with pytest.warns(RuntimeWarning, match='Ignoring argument "tail"'):
         permutation_cluster_test(X, tail=0)
+
+    # nan handling in TFCE
+    X = np.repeat(X[0], 2, axis=1)
+    X[:, 1] = 0
+    with pytest.warns(RuntimeWarning, match='invalid value'):  # NumPy
+        out = permutation_cluster_1samp_test(
+            X, seed=0, threshold=dict(start=0, step=0.1))
+    assert (out[2] < 0.05).any()
+    assert not (out[2] < 0.05).all()
+    X[:, 0] = 0
+    with pytest.raises(RuntimeError, match='finite'):
+        with np.errstate(invalid='ignore'):
+            permutation_cluster_1samp_test(
+                X, seed=0, threshold=dict(start=0, step=0.1),
+                buffer_size=None)
 
 
 def test_cache_dir(tmpdir, numba_conditional):
@@ -152,13 +168,6 @@ def test_permutation_large_n_samples(numba_conditional):
 
 def test_permutation_step_down_p(numba_conditional):
     """Test cluster level permutations with step_down_p."""
-    try:
-        try:
-            from sklearn.feature_extraction.image import grid_to_graph
-        except ImportError:
-            from scikits.learn.feature_extraction.image import grid_to_graph  # noqa: F401,E501 analysis:ignore
-    except ImportError:
-        return
     rng = np.random.RandomState(0)
     # subjects, time points, spatial points
     X = rng.randn(9, 2, 10)
@@ -215,64 +224,67 @@ def test_cluster_permutation_test(numba_conditional):
                                  stat_fun=stat_fun)
 
 
-def test_cluster_permutation_t_test(numba_conditional):
+@pytest.mark.parametrize('stat_fun', [
+    ttest_1samp_no_p,
+    partial(ttest_1samp_no_p, sigma=1e-1)
+])
+def test_cluster_permutation_t_test(numba_conditional, stat_fun):
     """Test cluster level permutations T-test."""
     condition1_1d, condition2_1d, condition1_2d, condition2_2d = \
         _get_conditions()
 
     # use a very large sigma to make sure Ts are not independent
-    stat_funs = [ttest_1samp_no_p,
-                 partial(ttest_1samp_no_p, sigma=1e-1)]
+    for condition1, p in ((condition1_1d, 0.01),
+                          (condition1_2d, 0.01)):
+        # these are so significant we can get away with fewer perms
+        T_obs, clusters, cluster_p_values, hist =\
+            permutation_cluster_1samp_test(condition1, n_permutations=100,
+                                           tail=0, seed=1,
+                                           buffer_size=None)
+        assert_equal(np.sum(cluster_p_values < 0.05), 1)
+        p_min = np.min(cluster_p_values)
+        assert_allclose(p_min, p, atol=1e-6)
 
-    for stat_fun in stat_funs:
-        for condition1, p in ((condition1_1d, 0.01),
-                              (condition1_2d, 0.01)):
-            # these are so significant we can get away with fewer perms
-            T_obs, clusters, cluster_p_values, hist =\
-                permutation_cluster_1samp_test(condition1, n_permutations=100,
-                                               tail=0, seed=1,
-                                               buffer_size=None)
-            assert_equal(np.sum(cluster_p_values < 0.05), 1)
-            p_min = np.min(cluster_p_values)
-            assert_allclose(p_min, p, atol=1e-6)
+        T_obs_pos, c_1, cluster_p_values_pos, _ =\
+            permutation_cluster_1samp_test(condition1, n_permutations=100,
+                                           tail=1, threshold=1.67, seed=1,
+                                           stat_fun=stat_fun,
+                                           buffer_size=None)
 
-            T_obs_pos, c_1, cluster_p_values_pos, _ =\
-                permutation_cluster_1samp_test(condition1, n_permutations=100,
-                                               tail=1, threshold=1.67, seed=1,
-                                               stat_fun=stat_fun,
-                                               buffer_size=None)
+        T_obs_neg, _, cluster_p_values_neg, _ =\
+            permutation_cluster_1samp_test(-condition1, n_permutations=100,
+                                           tail=-1, threshold=-1.67,
+                                           seed=1, stat_fun=stat_fun,
+                                           buffer_size=None)
+        assert_array_equal(T_obs_pos, -T_obs_neg)
+        assert_array_equal(cluster_p_values_pos < 0.05,
+                           cluster_p_values_neg < 0.05)
 
-            T_obs_neg, _, cluster_p_values_neg, _ =\
-                permutation_cluster_1samp_test(-condition1, n_permutations=100,
-                                               tail=-1, threshold=-1.67,
-                                               seed=1, stat_fun=stat_fun,
-                                               buffer_size=None)
-            assert_array_equal(T_obs_pos, -T_obs_neg)
-            assert_array_equal(cluster_p_values_pos < 0.05,
-                               cluster_p_values_neg < 0.05)
+        # test with 2 jobs and buffer_size enabled
+        buffer_size = condition1.shape[1] // 10
+        with pytest.warns(None):  # sometimes "independently"
+            T_obs_neg_buff, _, cluster_p_values_neg_buff, _ = \
+                permutation_cluster_1samp_test(
+                    -condition1, n_permutations=100, tail=-1,
+                    threshold=-1.67, seed=1, n_jobs=2, stat_fun=stat_fun,
+                    buffer_size=buffer_size)
 
-            # test with 2 jobs and buffer_size enabled
-            buffer_size = condition1.shape[1] // 10
-            with pytest.warns(None):  # sometimes "independently"
-                T_obs_neg_buff, _, cluster_p_values_neg_buff, _ = \
-                    permutation_cluster_1samp_test(
-                        -condition1, n_permutations=100, tail=-1,
-                        threshold=-1.67, seed=1, n_jobs=2, stat_fun=stat_fun,
-                        buffer_size=buffer_size)
+        assert_array_equal(T_obs_neg, T_obs_neg_buff)
+        assert_array_equal(cluster_p_values_neg, cluster_p_values_neg_buff)
 
-            assert_array_equal(T_obs_neg, T_obs_neg_buff)
-            assert_array_equal(cluster_p_values_neg, cluster_p_values_neg_buff)
+        # Bad stat_fun
+        with pytest.raises(TypeError, match='must be .* ndarray'):
+            permutation_cluster_1samp_test(
+                condition1, threshold=1, stat_fun=lambda x: None)
+        with pytest.raises(ValueError, match='not compatible'):
+            permutation_cluster_1samp_test(
+                condition1, threshold=1, stat_fun=lambda x: stat_fun(x)[:-1])
 
 
+@requires_sklearn
 def test_cluster_permutation_with_connectivity(numba_conditional):
     """Test cluster level permutations with connectivity matrix."""
-    try:
-        try:
-            from sklearn.feature_extraction.image import grid_to_graph
-        except ImportError:
-            from scikits.learn.feature_extraction.image import grid_to_graph
-    except ImportError:
-        return
+    from sklearn.feature_extraction.image import grid_to_graph
     condition1_1d, condition2_1d, condition1_2d, condition2_2d = \
         _get_conditions()
 
@@ -417,16 +429,18 @@ def test_cluster_permutation_with_connectivity(numba_conditional):
                                                                  step=1))
         assert np.min(out_connectivity_6[2]) < 0.05
 
+        with pytest.raises(ValueError, match='not compatible'):
+            with pytest.warns(RuntimeWarning, match='No clusters'):
+                spatio_temporal_func(
+                    X1d_3, n_permutations=50, connectivity=connectivity,
+                    threshold=1e-3, stat_fun=lambda *x: f_oneway(*x)[:-1],
+                    buffer_size=None)
 
+
+@requires_sklearn
 def test_permutation_connectivity_equiv(numba_conditional):
     """Test cluster level permutations with and without connectivity."""
-    try:
-        try:
-            from sklearn.feature_extraction.image import grid_to_graph
-        except ImportError:
-            from scikits.learn.feature_extraction.image import grid_to_graph
-    except ImportError:
-        return
+    from sklearn.feature_extraction.image import grid_to_graph
     rng = np.random.RandomState(0)
     # subjects, time points, spatial points
     n_time = 2
@@ -494,15 +508,10 @@ def test_permutation_connectivity_equiv(numba_conditional):
         assert_array_equal(stat_map, this_stat_map)
 
 
+@requires_sklearn
 def test_spatio_temporal_cluster_connectivity(numba_conditional):
     """Test spatio-temporal cluster permutations."""
-    try:
-        try:
-            from sklearn.feature_extraction.image import grid_to_graph
-        except ImportError:
-            from scikits.learn.feature_extraction.image import grid_to_graph
-    except ImportError:
-        return
+    from sklearn.feature_extraction.image import grid_to_graph
     condition1_1d, condition2_1d, condition1_2d, condition2_2d = \
         _get_conditions()
 

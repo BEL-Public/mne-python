@@ -17,7 +17,7 @@ Installing Python
 ^^^^^^^^^^^^^^^^^
 
 MNE-Python runs within Python, and depends on several other Python packages.
-Starting with version 0.18, MNE-Python only supports Python version 3.5 or
+Starting with version 0.21, MNE-Python only supports Python version 3.6 or
 higher. We strongly
 recommend the `Anaconda`_ distribution of Python, which comes with more than
 250 scientific packages pre-bundled, and includes the ``conda`` command line
@@ -134,11 +134,10 @@ MNE-Python with all dependencies is update your base Anaconda environment:
 
 .. collapse:: |apple| macOS
 
-   Use the base `environment file`_ and then update PyQt using :samp:`pip`, e.g.::
+   Use the base `environment file`_, e.g.::
 
        $ curl --remote-name https://raw.githubusercontent.com/mne-tools/mne-python/master/environment.yml
        $ conda env update --file environment.yml
-       $ pip install "PyQt5>=5.10,!=5.14.1"
 
 .. collapse:: |windows| Windows
 

@@ -21,8 +21,8 @@ from mne.datasets import testing
 from mne.minimum_norm import (apply_inverse, read_inverse_operator,
                               make_inverse_operator)
 from mne.source_space import get_volume_labels_from_aseg
-from mne.utils import (run_tests_if_main, requires_nibabel,
-                       requires_dipy, requires_h5py, requires_version)
+from mne.utils import (run_tests_if_main, requires_nibabel, check_version,
+                       requires_dipy, requires_h5py)
 from mne.fixes import _get_args
 
 # Setup paths
@@ -60,7 +60,6 @@ def test_sourcemorph_consistency():
         mne.morph._SOURCE_MORPH_ATTRIBUTES
 
 
-@requires_version('scipy', '0.13')  # SciPy 0.13 reduction bug
 @testing.requires_testing_data
 def test_sparse_morph():
     """Test sparse morphing."""
@@ -105,7 +104,6 @@ def test_sparse_morph():
     assert_allclose(stc_fs.data, stc_fs_return.data[np.concatenate(orders)])
 
 
-@requires_version('scipy', '0.13')  # SciPy 0.12 zero-length reduction bug
 @testing.requires_testing_data
 def test_xhemi_morph():
     """Test cross-hemisphere morphing."""
@@ -165,6 +163,34 @@ def test_xhemi_morph():
         assert_array_equal(stc_return.vertices[hi], stc.vertices[hi])
     correlation = np.corrcoef(stc.data.ravel(), stc_return.data.ravel())[0, 1]
     assert correlation > 0.9  # not great b/c of sparse grade + small smooth
+
+
+@testing.requires_testing_data
+@pytest.mark.parametrize('smooth, lower, upper, n_warn', [
+    (None, 0.959, 0.963, 0),
+    (3, 0.968, 0.971, 2),
+    ('nearest', 0.98, 0.99, 0),
+])
+def test_surface_source_morph_round_trip(smooth, lower, upper, n_warn):
+    """Test round-trip morphing yields similar STCs."""
+    kwargs = dict(smooth=smooth, warn=True, subjects_dir=subjects_dir)
+    stc = mne.read_source_estimate(fname_smorph)
+    if smooth == 'nearest' and not check_version('scipy', '1.3'):
+        with pytest.raises(ValueError, match='required to use nearest'):
+            morph = compute_source_morph(stc, 'sample', 'fsaverage', **kwargs)
+        return
+    with pytest.warns(None) as w:
+        morph = compute_source_morph(stc, 'sample', 'fsaverage', **kwargs)
+    w = [ww for ww in w if 'vertices not included' in str(ww.message)]
+    assert len(w) == n_warn
+    assert morph.morph_mat.shape == (20484, len(stc.data))
+    stc_fs = morph.apply(stc)
+    morph_back = compute_source_morph(
+        stc_fs, 'fsaverage', 'sample', spacing=stc.vertices, **kwargs)
+    assert morph_back.morph_mat.shape == (len(stc.data), 20484)
+    stc_back = morph_back.apply(stc_fs)
+    corr = np.corrcoef(stc.data.ravel(), stc_back.data.ravel())[0, 1]
+    assert lower <= corr <= upper
 
 
 @requires_h5py
@@ -300,12 +326,12 @@ def test_volume_source_morph(tmpdir):
     # check morph
     stc_vol_morphed = source_morph_vol.apply(stc_vol)
     # old way, verts do not match
-    assert not np.array_equal(stc_vol_morphed.vertices, stc_vol.vertices)
+    assert not np.array_equal(stc_vol_morphed.vertices[0], stc_vol.vertices[0])
 
     # vector
     stc_vol_vec = VolVectorSourceEstimate(
-        np.tile(stc_vol.data[:, np.newaxis], (1, 3, 1)), stc_vol.vertices,
-        0, 1)
+        np.tile(stc_vol.data[:, np.newaxis], (1, 3, 1)),
+        stc_vol.vertices, 0, 1)
     stc_vol_vec_morphed = source_morph_vol.apply(stc_vol_vec)
     assert isinstance(stc_vol_vec_morphed, VolVectorSourceEstimate)
     for ii in range(3):
@@ -391,9 +417,10 @@ def test_volume_source_morph(tmpdir):
         subject_to='sample', subjects_dir=subjects_dir, **kwargs)
     stc_vol_2 = source_morph_vol.apply(stc_vol)
     # new way, verts match
-    assert_array_equal(stc_vol.vertices, stc_vol_2.vertices)
+    assert_array_equal(stc_vol.vertices[0], stc_vol_2.vertices[0])
     stc_vol_bad = VolSourceEstimate(
-        stc_vol.data[:-1], stc_vol.vertices[:-1], stc_vol.tmin, stc_vol.tstep)
+        stc_vol.data[:-1], [stc_vol.vertices[0][:-1]],
+        stc_vol.tmin, stc_vol.tstep)
     with pytest.raises(ValueError, match='vertices do not match between morp'):
         source_morph_vol.apply(stc_vol_bad)
 
@@ -472,7 +499,6 @@ def test_morph_stc_dense():
             subjects_dir=subjects_dir)
 
 
-@requires_version('scipy', '0.13')
 @testing.requires_testing_data
 def test_morph_stc_sparse():
     """Test morphing stc with sparse=True."""
@@ -551,10 +577,13 @@ def test_volume_labels_morph(tmpdir):
     n_on = np.array(img.dataobj).astype(bool).sum()
     # This was 291 on `master` before gh-5590. Then refactoring transforms
     # it became 279 despite a < 1e-8 change in vox_mri_t
-    assert n_on in (279, 291)
+    # Then it dropped to 123 once nearest-voxel was used in gh-7653
+    assert n_on in (123, 279, 291)
     img = stc.as_volume(src, mri_resolution=False)
     n_on = np.array(img.dataobj).astype(bool).sum()
-    assert n_on == 44  # was 20 on `master` before gh-5590
+    # was 20 on `master` before gh-5590
+    # then 44 before gh-7653, which took it back to 20
+    assert n_on == 20
 
 
 run_tests_if_main()

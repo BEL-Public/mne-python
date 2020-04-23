@@ -155,14 +155,14 @@ def test_scale_bar():
     sfreq = 1000.
     t = np.arange(10000) / sfreq
     data = np.sin(2 * np.pi * 10. * t)
-    # +/- 1000 fT, 400 fT/cm, 20 uV
+    # +/- 1000 fT, 400 fT/cm, 20 µV
     data = data * np.array([[1000e-15, 400e-13, 20e-6]]).T
     info = create_info(3, sfreq, ('mag', 'grad', 'eeg'))
     raw = RawArray(data, info)
     fig = raw.plot()
     ax = fig.axes[0]
     assert len(ax.texts) == 3  # our labels
-    for text, want in zip(ax.texts, ('800.0 fT/cm', '2000.0 fT', '40.0 uV')):
+    for text, want in zip(ax.texts, ('800.0 fT/cm', '2000.0 fT', '40.0 µV')):
         assert text.get_text().strip() == want
     assert len(ax.lines) == 8  # green, data, nan, bars
     for data, bar in zip(ax.lines[1:4], ax.lines[5:8]):
@@ -218,8 +218,10 @@ def test_plot_raw():
     _fake_click(ssp_fig, ssp_fig.get_axes()[1], [0.5, 0.5])  # all off
     _fake_click(ssp_fig, ssp_fig.get_axes()[1], [0.5, 0.5], kind='release')
     assert _proj_status(ax) == [False] * 3
+    assert fig._mne_params['projector'] is None  # actually off
     _fake_click(ssp_fig, ssp_fig.get_axes()[1], [0.5, 0.5])  # all on
     _fake_click(ssp_fig, ssp_fig.get_axes()[1], [0.5, 0.5], kind='release')
+    assert fig._mne_params['projector'] is not None  # on
     assert _proj_status(ax) == [True] * 3
 
     # test keypresses
@@ -290,6 +292,12 @@ def test_plot_raw():
             break
     for key in ['down', 'up', 'escape']:
         fig.canvas.key_press_event(key)
+
+    raw._data[:] = np.nan
+    # this should (at least) not die, the output should pretty clearly show
+    # that there is a problem so probably okay to just plot something blank
+    with pytest.warns(None):
+        raw.plot(scalings='auto')
 
     plt.close('all')
 

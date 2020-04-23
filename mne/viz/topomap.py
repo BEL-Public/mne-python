@@ -4,10 +4,10 @@
 #          Denis Engemann <denis.engemann@gmail.com>
 #          Martin Luessi <mluessi@nmr.mgh.harvard.edu>
 #          Eric Larson <larson.eric.d@gmail.com>
+#          Robert Luke <mail@robertluke.net>
 #
 # License: Simplified BSD
 
-import math
 import copy
 import itertools
 from functools import partial
@@ -17,16 +17,15 @@ import warnings
 import numpy as np
 
 from ..baseline import rescale
-from ..defaults import HEAD_SIZE_DEFAULT
 from ..channels.channels import _get_ch_type
 from ..channels.layout import (
-    _find_topomap_coords, _merge_grad_data, find_layout, _pair_grad_sensors,
-    Layout)
-from ..fixes import _remove_duplicate_rows
-from ..io.pick import (pick_types, _picks_by_type, channel_type, pick_info,
-                       _pick_data_channels, pick_channels, _picks_to_idx)
+    _find_topomap_coords, find_layout, _pair_grad_sensors, _merge_ch_data)
+from ..defaults import _EXTRAPOLATE_DEFAULT, _BORDER_DEFAULT
+from ..io.pick import (pick_types, _picks_by_type, pick_info, pick_channels,
+                       _pick_data_channels, _picks_to_idx, _get_channel_types,
+                       _MEG_CH_TYPES_SPLIT)
 from ..utils import (_clean_names, _time_mask, verbose, logger, warn, fill_doc,
-                     _validate_type, _check_sphere)
+                     _validate_type, _check_sphere, _check_option)
 from .utils import (tight_layout, _setup_vmin_vmax, _prepare_trellis,
                     _check_delayed_ssp, _draw_proj_checkbox, figure_nobar,
                     plt_show, _process_times, DraggableColorbar,
@@ -36,6 +35,9 @@ from ..defaults import _handle_default
 from ..transforms import apply_trans, invert_transform
 from ..io.meas_info import Info, _simplify_info
 from ..io.proj import Projection
+
+
+_fnirs_types = ('hbo', 'hbr', 'fnirs_raw', 'fnirs_od')
 
 
 def _adjust_meg_sphere(sphere, info, ch_type):
@@ -61,19 +63,10 @@ def _adjust_meg_sphere(sphere, info, ch_type):
     return sphere, clip_origin
 
 
-def _deprecate_layout(layout):
-    if layout is not None:
-        warn('Using a layout with topomaps is deprecated and will be removed '
-             'in 0.21', DeprecationWarning)
-
-
-def _prepare_topomap_plot(inst, ch_type, layout=None, sphere=None):
+def _prepare_topomap_plot(inst, ch_type, sphere=None):
     """Prepare topo plot."""
     info = copy.deepcopy(inst if isinstance(inst, Info) else inst.info)
     sphere, clip_origin = _adjust_meg_sphere(sphere, info, ch_type)
-
-    _deprecate_layout(layout)
-    del layout
 
     clean_ch_names = _clean_names(info['ch_names'])
     for ii, this_ch in enumerate(info['chs']):
@@ -92,18 +85,19 @@ def _prepare_topomap_plot(inst, ch_type, layout=None, sphere=None):
              layout.kind.startswith('Neuromag_122'))):
         picks, _ = _pair_grad_sensors(info, layout)
         pos = _find_topomap_coords(info, picks[::2], sphere=sphere)
-        merge_grads = True
+        merge_channels = True
+    elif ch_type in _fnirs_types:
+        # fNIRS data commonly has overlapping channels, so deal with separately
+        picks, pos, merge_channels, overlapping_channels = \
+            _average_fnirs_overlaps(info, ch_type, sphere)
     else:
-        merge_grads = False
+        merge_channels = False
         if ch_type == 'eeg':
             picks = pick_types(info, meg=False, eeg=True, ref_meg=False,
                                exclude='bads')
         elif ch_type == 'csd':
             picks = pick_types(info, meg=False, csd=True, ref_meg=False,
                                exclude='bads')
-        elif ch_type in ['hbo', 'hbr', 'fnirs_raw', 'fnirs_od']:
-            picks = pick_types(info, meg=False, ref_meg=False,
-                               fnirs=ch_type, exclude='bads')
         else:
             picks = pick_types(info, meg=ch_type, ref_meg=False,
                                exclude='bads')
@@ -114,12 +108,79 @@ def _prepare_topomap_plot(inst, ch_type, layout=None, sphere=None):
         pos = _find_topomap_coords(info, picks, sphere=sphere)
 
     ch_names = [info['ch_names'][k] for k in picks]
-    if merge_grads:
-        # change names so that vectorview combined grads appear as MEG014x
-        # instead of MEG0142 or MEG0143 which are the 2 planar grads.
-        ch_names = [ch_names[k][:-1] + 'x' for k in range(0, len(ch_names), 2)]
+    if ch_type in _fnirs_types:
+        # Remove the chroma label type for cleaner labeling.
+        ch_names = [k[:-4] for k in ch_names]
+
+    if merge_channels:
+        if ch_type == 'grad':
+            # change names so that vectorview combined grads appear as MEG014x
+            # instead of MEG0142 or MEG0143 which are the 2 planar grads.
+            ch_names = [ch_names[k][:-1] + 'x' for k in
+                        range(0, len(ch_names), 2)]
+        else:
+            assert ch_type in _fnirs_types
+            # Modify the nirs channel names to indicate they are to be merged
+            # New names will have the form  S1_D1xS2_D2
+            # More than two channels can overlap and be merged
+            for set in overlapping_channels:
+                idx = ch_names.index(set[0][:-4])
+                new_name = 'x'.join(s[:-4] for s in set)
+                ch_names[idx] = new_name
+
     pos = np.array(pos)[:, :2]  # 2D plot, otherwise interpolation bugs
-    return picks, pos, merge_grads, ch_names, ch_type, sphere, clip_origin
+    return picks, pos, merge_channels, ch_names, ch_type, sphere, clip_origin
+
+
+def _average_fnirs_overlaps(info, ch_type, sphere):
+
+    from scipy.spatial.distance import pdist, squareform
+
+    picks = pick_types(info, meg=False, ref_meg=False,
+                       fnirs=ch_type, exclude='bads')
+    chs = [info['chs'][i] for i in picks]
+    locs3d = np.array([ch['loc'][:3] for ch in chs])
+    dist = pdist(locs3d)
+
+    # Store the sets of channels to be merged
+    overlapping_channels = list()
+    # Channels to be excluded from picks, as will be removed after merging
+    channels_to_exclude = list()
+
+    if len(locs3d) > 1 and np.min(dist) < 1e-10:
+
+        overlapping_mask = np.triu(squareform(dist < 1e-10))
+        for chan_idx in range(overlapping_mask.shape[0]):
+            already_overlapped = list(itertools.chain.from_iterable(
+                overlapping_channels))
+            if overlapping_mask[chan_idx].any() and \
+                    (chs[chan_idx]['ch_name'] not in already_overlapped):
+                # Determine the set of channels to be combined. Ensure the
+                # first listed channel is the one to be replaced with merge
+                overlapping_set = [chs[i]['ch_name'] for i in
+                                   np.where(overlapping_mask[chan_idx])[0]]
+                overlapping_set = np.insert(overlapping_set, 0,
+                                            (chs[chan_idx]['ch_name']))
+                overlapping_channels.append(overlapping_set)
+                channels_to_exclude.append(overlapping_set[1:])
+
+        exclude = list(itertools.chain.from_iterable(channels_to_exclude))
+        [exclude.append(bad) for bad in info['bads']]
+        picks = pick_types(info, meg=False, ref_meg=False, fnirs=ch_type,
+                           exclude=exclude)
+        pos = _find_topomap_coords(info, picks, sphere=sphere)
+        picks = pick_types(info, meg=False, ref_meg=False, fnirs=ch_type)
+        # Overload the merge_channels variable as this is returned to calling
+        # function and indicates that merging of data is required
+        merge_channels = overlapping_channels
+
+    else:
+        picks = pick_types(info, meg=False, ref_meg=False, fnirs=ch_type,
+                           exclude='bads')
+        merge_channels = False
+        pos = _find_topomap_coords(info, picks, sphere=sphere)
+
+    return picks, pos, merge_channels, overlapping_channels
 
 
 def _plot_update_evoked_topomap(params, bools):
@@ -134,8 +195,8 @@ def _plot_update_evoked_topomap(params, bools):
     new_evoked.apply_proj()
 
     data = new_evoked.data[:, params['time_idx']] * params['scale']
-    if params['merge_grads']:
-        data = _merge_grad_data(data)
+    if params['merge_channels']:
+        data, _ = _merge_ch_data(data, 'grad', [])
 
     interp = params['interp']
     new_contours = list()
@@ -167,7 +228,7 @@ def _add_colorbar(ax, im, cmap, side="right", pad=.05, title=None,
                   format=None, size="5%"):
     """Add a colorbar to an axis."""
     import matplotlib.pyplot as plt
-    from mpl_toolkits.axes_grid1 import make_axes_locatable  # noqa: F401
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
     divider = make_axes_locatable(ax)
     cax = divider.append_axes(side, size=size, pad=pad)
     cbar = plt.colorbar(im, cax=cax, format=format)
@@ -205,8 +266,9 @@ def _eliminate_zeros(proj):
 def plot_projs_topomap(projs, info, cmap=None, sensors=True,
                        colorbar=False, res=64, size=1, show=True,
                        outlines='head', contours=6, image_interp='bilinear',
-                       axes=None, vlim=(None, None), layout=None,
-                       sphere=None, extrapolate='box', border=0):
+                       axes=None, vlim=(None, None),
+                       sphere=None, extrapolate=_EXTRAPOLATE_DEFAULT,
+                       border=_BORDER_DEFAULT):
     """Plot topographic maps of SSP projections.
 
     Parameters
@@ -217,7 +279,7 @@ def plot_projs_topomap(projs, info, cmap=None, sensors=True,
         The info associated with the channels in the projectors.
 
         .. versionchanged:: 0.20
-            The positional argument ``layout`` has been deprecated and replaced
+            The positional argument ``layout`` was deprecated and replaced
             by ``info``.
     %(proj_topomap_kwargs)s
     %(topomap_sphere_auto)s
@@ -229,7 +291,7 @@ def plot_projs_topomap(projs, info, cmap=None, sensors=True,
     Returns
     -------
     fig : instance of matplotlib.figure.Figure
-        Figure distributing one image per channel across sensor topography.
+        Figure with a topomap subplot for each projector.
 
     Notes
     -----
@@ -242,12 +304,9 @@ def plot_projs_topomap(projs, info, cmap=None, sensors=True,
     if isinstance(projs, Projection):
         projs = [projs]
 
-    if isinstance(info, Layout) or layout is not None:
-        warn('layout is deprecated and no longer used. It will be removed in '
-             '0.21. Pass info instead.', DeprecationWarning)
     _validate_type(info, 'info', 'info')
 
-    types, datas, poss, spheres, outliness = [], [], [], [], []
+    types, datas, poss, spheres, outliness, ch_typess = [], [], [], [], [], []
     for proj in projs:
         # get ch_names, ch_types, data
         proj = _eliminate_zeros(proj)  # gh 5641
@@ -256,43 +315,39 @@ def plot_projs_topomap(projs, info, cmap=None, sensors=True,
         if vlim == 'joint':
             ch_idxs = np.where(np.in1d(info['ch_names'],
                                        proj['data']['col_names']))[0]
-            these_ch_types = set([channel_type(info, n) for n in ch_idxs])
+            these_ch_types = _get_channel_types(info, ch_idxs, unique=True)
             # each projector should have only one channel type
             assert len(these_ch_types) == 1
             types.append(list(these_ch_types)[0])
         data = proj['data']['data'].ravel()
         info_names = _clean_names(info['ch_names'], remove_whitespace=True)
         use_info = pick_info(info, pick_channels(info_names, ch_names))
-        data_picks, pos, merge_grads, names, _, this_sphere, clip_origin = \
-            _prepare_topomap_plot(
+        data_picks, pos, merge_channels, names, ch_type, this_sphere, \
+            clip_origin = _prepare_topomap_plot(
                 use_info, _get_ch_type(use_info, None), sphere=sphere)
         these_outlines = _make_head_outlines(
             sphere, pos, outlines, clip_origin)
         data = data[data_picks]
-        if merge_grads:
-            data = _merge_grad_data(data).ravel()
+        if merge_channels:
+            data, _ = _merge_ch_data(data, 'grad', [])
+            data = data.ravel()
 
         # populate containers
         datas.append(data)
         poss.append(pos)
         spheres.append(this_sphere)
         outliness.append(these_outlines)
+        ch_typess.append(ch_type)
     del sphere
 
     # setup axes
     n_projs = len(projs)
-    nrows = math.floor(math.sqrt(n_projs))
-    ncols = math.ceil(n_projs / nrows)
     if axes is None:
-        _, axes = plt.subplots(nrows, ncols, squeeze=False,
-                               figsize=(ncols * 2, nrows * 2))
-        axes = axes.ravel()
-        if len(axes[n_projs:]):
-            [ax.remove() for ax in axes[n_projs:]]
-            axes = axes[:n_projs]
+        fig, axes, ncols, nrows = _prepare_trellis(
+            n_projs, ncols='auto', nrows='auto')
     elif isinstance(axes, plt.Axes):
         axes = [axes]
-    if len(axes) != len(projs):
+    if len(axes) != n_projs:
         raise RuntimeError('There must be an axes for each picked projector.')
 
     # handle vmin/vmax
@@ -311,8 +366,8 @@ def plot_projs_topomap(projs, info, cmap=None, sensors=True,
         vlims = [vlim for _ in range(len(datas))]
 
     # plot
-    for proj, ax, _data, _pos, _vlim, _sphere, _outlines in zip(
-            projs, axes, datas, poss, vlims, spheres, outliness):
+    for proj, ax, _data, _pos, _vlim, _sphere, _outlines, _ch_type in zip(
+            projs, axes, datas, poss, vlims, spheres, outliness, ch_typess):
         # title
         title = proj['desc']
         title = '\n'.join(title[ii:ii + 22] for ii in range(0, len(title), 22))
@@ -324,7 +379,7 @@ def plot_projs_topomap(projs, info, cmap=None, sensors=True,
                           outlines=_outlines, contours=contours,
                           image_interp=image_interp, show=False,
                           extrapolate=extrapolate, sphere=_sphere,
-                          border=border)[0]
+                          border=border, ch_type=ch_type)[0]
 
         if colorbar:
             _add_colorbar(ax, im, cmap)
@@ -337,29 +392,11 @@ def plot_projs_topomap(projs, info, cmap=None, sensors=True,
     return fig
 
 
-def _layout_pos_to_head_pos(pos):
-    # XXX ideally functions using layout + head would be refactored not to
-    # use layouts at all, but in the meantime we can approximate this effect
-    pos = pos - 0.5
-    pos *= HEAD_SIZE_DEFAULT * 2.
-    return pos
-
-
-def _head_pos_to_layout_pos(pos):
-    pos = pos / (HEAD_SIZE_DEFAULT * 2.)
-    pos += 0.5
-    return pos
-
-
-def _make_head_outlines(sphere, pos, outlines, clip_origin, head_pos=None):
+def _make_head_outlines(sphere, pos, outlines, clip_origin):
     """Check or create outlines for topoplot."""
     assert isinstance(sphere, np.ndarray)
     x, y, _, radius = sphere
     del sphere
-    if head_pos is not None:
-        warn('head_pos is deprecated and will be removed in 0.21. '
-             'It is no longer used, use sphere instead.',
-             DeprecationWarning)
 
     if outlines in ('head', 'skirt', None):
         ll = np.linspace(0, 2 * np.pi, 101)
@@ -415,18 +452,17 @@ def _draw_outlines(ax, outlines):
     return outlines_
 
 
-def _get_extra_points(pos, extrapolate, sphere):
-    """Get coordinates of additinal interpolation points.
-
-    If sphere is None, returns coordinates of convex hull of channel
-    positions, expanded by the median inter-channel distance.
-    Otherwise gives positions of points on the head circle placed with a step
-    of median inter-channel distance.
-    """
+def _get_extra_points(pos, extrapolate, origin, radii):
+    """Get coordinates of additinal interpolation points."""
     from scipy.spatial.qhull import Delaunay
-    x, y, _, head_radius = sphere
+    radii = np.array(radii, float)
+    assert radii.shape == (2,)
+    x, y = origin
+    # auto should be gone by now
+    _check_option('extrapolate', extrapolate, ('head', 'box', 'local'))
 
     # the old method of placement - large box
+    mask_pos = None
     if extrapolate == 'box':
         extremes = np.array([pos.min(axis=0), pos.max(axis=0)])
         diffs = extremes[1] - extremes[0]
@@ -436,7 +472,7 @@ def _get_extra_points(pos, extrapolate, sphere):
             *([[0] * (pos.shape[1] - 1) + [1]] * pos.shape[1]))))
         pidx = np.tile(np.arange(pos.shape[1])[np.newaxis], (len(eidx), 1))
         outer_pts = extremes[eidx, pidx]
-        return outer_pts, Delaunay(np.concatenate((pos, outer_pts)))
+        return outer_pts, mask_pos, Delaunay(np.concatenate((pos, outer_pts)))
 
     # check if positions are colinear:
     diffs = np.diff(pos, axis=0)
@@ -483,25 +519,35 @@ def _get_extra_points(pos, extrapolate, sphere):
                 new_pos = new_pos[good_extra]
 
             tri = Delaunay(np.concatenate([pos, new_pos], axis=0))
-            return new_pos, tri
+            return new_pos, new_pos, tri
 
         # get the convex hull of data points from triangulation
         hull_pos = pos[tri.convex_hull]
 
         # extend the convex hull limits outwards a bit
-        channels_center = pos.mean(axis=0, keepdims=True)
-        radial_dir = hull_pos - channels_center[np.newaxis, :]
+        channels_center = pos.mean(axis=0)
+        radial_dir = hull_pos - channels_center
         unit_radial_dir = radial_dir / np.linalg.norm(radial_dir, axis=-1,
                                                       keepdims=True)
         hull_extended = hull_pos + unit_radial_dir * distance
+        mask_pos = hull_pos + unit_radial_dir * distance * 0.5
         hull_diff = np.diff(hull_pos, axis=1)[:, 0]
         hull_distances = np.linalg.norm(hull_diff, axis=-1)
+        del channels_center
+
+        # Construct a mask
+        mask_pos = np.unique(mask_pos.reshape(-1, 2), axis=0)
+        mask_center = np.mean(mask_pos, axis=0)
+        mask_pos -= mask_center
+        mask_pos = mask_pos[
+            np.argsort(np.arctan2(mask_pos[:, 1], mask_pos[:, 0]))]
+        mask_pos += mask_center
 
         # add points along hull edges so that the distance between points
         # is around that of average distance between channels
         add_points = list()
         eps = np.finfo('float').eps
-        n_times_dist = np.round(hull_distances / distance).astype('int')
+        n_times_dist = np.round(0.25 * hull_distances / distance).astype('int')
         for n in range(2, n_times_dist.max() + 1):
             mask = n_times_dist == n
             mult = np.arange(1 / n, 1 - eps, 1 / n)[:, np.newaxis, np.newaxis]
@@ -510,21 +556,22 @@ def _get_extra_points(pos, extrapolate, sphere):
                                steps).reshape((-1, 2)))
 
         # remove duplicates from hull_extended
-        hull_extended = _remove_duplicate_rows(hull_extended.reshape((-1, 2)))
+        hull_extended = np.unique(hull_extended.reshape((-1, 2)), axis=0)
         new_pos = np.concatenate([hull_extended] + add_points)
     else:
+        assert extrapolate == 'head'
         # return points on the head circle
-        angle = np.arcsin(distance / 2 / head_radius)
+        angle = np.arcsin(distance / 2 / np.mean(radii))
         points_l = np.arange(0, 2 * np.pi, angle)
-        use_radius = head_radius * 1.1
-        points_x = np.cos(points_l) * use_radius + x
-        points_y = np.sin(points_l) * use_radius + y
+        use_radii = radii * 1.1
+        points_x = np.cos(points_l) * use_radii[0] + x
+        points_y = np.sin(points_l) * use_radii[1] + y
         new_pos = np.stack([points_x, points_y], axis=1)
         if colinear or pos.shape[0] == 3:
             tri = Delaunay(np.concatenate([pos, new_pos], axis=0))
-            return new_pos, tri
+            return new_pos, mask_pos, tri
     tri.add_points(new_pos)
-    return new_pos, tri
+    return new_pos, mask_pos, tri
 
 
 class _GridData(object):
@@ -535,14 +582,16 @@ class _GridData(object):
     to be set independently.
     """
 
-    def __init__(self, pos, extrapolate, sphere, border):
+    def __init__(self, pos, extrapolate, origin, radii, border):
         # in principle this works in N dimensions, not just 2
         assert pos.ndim == 2 and pos.shape[1] == 2, pos.shape
         _validate_type(border, ('numeric', str), 'border')
 
         # Adding points outside the extremes helps the interpolators
-        outer_pts, tri = _get_extra_points(pos, extrapolate, sphere)
+        outer_pts, mask_pts, tri = _get_extra_points(
+            pos, extrapolate, origin, radii)
         self.n_extra = outer_pts.shape[0]
+        self.mask_pts = mask_pts
         self.border = border
         self.tri = tri
 
@@ -566,10 +615,18 @@ class _GridData(object):
             v_extra = np.zeros(self.n_extra)
             indices, indptr = self.tri.vertex_neighbor_vertices
             rng = range(n_points, n_points + self.n_extra)
+            used = np.zeros(len(rng), bool)
             for idx, extra_idx in enumerate(rng):
                 ngb = indptr[indices[extra_idx]:indices[extra_idx + 1]]
                 ngb = ngb[ngb < n_points]
-                v_extra[idx] = v[ngb].mean()
+                if len(ngb) > 0:
+                    used[idx] = True
+                    v_extra[idx] = v[ngb].mean()
+            if not used.all() and used.any():
+                # Eventually we might want to use the value of the nearest
+                # point or something, but this case should hopefully be
+                # rare so for now just use the average value of all extras
+                v_extra[~used] = np.mean(v_extra[used])
         else:
             v_extra = np.full(self.n_extra, self.border, dtype=float)
 
@@ -614,8 +671,9 @@ def plot_topomap(data, pos, vmin=None, vmax=None, cmap=None, sensors=True,
                  res=64, axes=None, names=None, show_names=False, mask=None,
                  mask_params=None, outlines='head',
                  contours=6, image_interp='bilinear', show=True,
-                 head_pos=None, onselect=None, extrapolate='box',
-                 sphere=None, border=0):
+                 onselect=None, extrapolate=_EXTRAPOLATE_DEFAULT,
+                 sphere=None, border=_BORDER_DEFAULT,
+                 ch_type='eeg'):
     """Plot a topographic map as image.
 
     Parameters
@@ -669,14 +727,13 @@ def plot_topomap(data, pos, vmin=None, vmax=None, cmap=None, sensors=True,
     contours : int | array of float
         The number of contour lines to draw. If 0, no contours will be drawn.
         If an array, the values represent the levels for the contours. The
-        values are in uV for EEG, fT for magnetometers and fT/m for
+        values are in µV for EEG, fT for magnetometers and fT/m for
         gradiometers. Defaults to 6.
     image_interp : str
         The image interpolation to be used. All matplotlib options are
         accepted.
     show : bool
         Show figure if True.
-    %(topomap_head_pos)s
     onselect : callable | None
         Handle for a function that is called when the user selects a set of
         channels by rectangle selection (matplotlib ``RectangleSelector``). If
@@ -686,6 +743,7 @@ def plot_topomap(data, pos, vmin=None, vmax=None, cmap=None, sensors=True,
         .. versionadded:: 0.18
     %(topomap_sphere)s
     %(topomap_border)s
+    %(topomap_ch_type)s
 
     Returns
     -------
@@ -698,8 +756,8 @@ def plot_topomap(data, pos, vmin=None, vmax=None, cmap=None, sensors=True,
     return _plot_topomap(data, pos, vmin, vmax, cmap, sensors, res, axes,
                          names, show_names, mask, mask_params, outlines,
                          contours, image_interp, show,
-                         head_pos, onselect, extrapolate,
-                         sphere=sphere, border=border)[:2]
+                         onselect, extrapolate, sphere=sphere, border=border,
+                         ch_type=ch_type)[:2]
 
 
 def _setup_interp(pos, res, extrapolate, sphere, outlines, border):
@@ -723,7 +781,7 @@ def _setup_interp(pos, res, extrapolate, sphere, outlines, border):
     xi = np.linspace(xmin, xmax, res)
     yi = np.linspace(ymin, ymax, res)
     Xi, Yi = np.meshgrid(xi, yi)
-    interp = _GridData(pos, extrapolate, sphere, border)
+    interp = _GridData(pos, extrapolate, clip_origin, clip_radius, border)
     extent = (xmin, xmax, ymin, ymax)
     return extent, Xi, Yi, interp
 
@@ -732,8 +790,8 @@ def _plot_topomap(data, pos, vmin=None, vmax=None, cmap=None, sensors=True,
                   res=64, axes=None, names=None, show_names=False, mask=None,
                   mask_params=None, outlines='head',
                   contours=6, image_interp='bilinear', show=True,
-                  head_pos=None, onselect=None, extrapolate='box',
-                  sphere=None, border=0):
+                  onselect=None, extrapolate=_EXTRAPOLATE_DEFAULT, sphere=None,
+                  border=_BORDER_DEFAULT, ch_type='eeg'):
     import matplotlib.pyplot as plt
     from matplotlib.widgets import RectangleSelector
     data = np.asarray(data)
@@ -744,8 +802,7 @@ def _plot_topomap(data, pos, vmin=None, vmax=None, cmap=None, sensors=True,
         pos = pick_info(pos, picks)
 
         # check if there is only 1 channel type, and n_chans matches the data
-        ch_type = {channel_type(pos, idx)
-                   for idx, _ in enumerate(pos["chs"])}
+        ch_type = _get_channel_types(pos, unique=True)
         info_help = ("Pick Info with e.g. mne.pick_info and "
                      "mne.io.pick.channel_indices_by_type.")
         if len(ch_type) > 1:
@@ -760,11 +817,17 @@ def _plot_topomap(data, pos, vmin=None, vmax=None, cmap=None, sensors=True,
 
         if any(type_ in ch_type for type_ in ('planar', 'grad')):
             # deal with grad pairs
-            picks, pos = _pair_grad_sensors(pos, find_layout(pos))
-            data = _merge_grad_data(data[picks]).reshape(-1)
+            picks = _pair_grad_sensors(pos, topomap_coords=False)
+            pos = _find_topomap_coords(pos, picks=picks[::2], sphere=sphere)
+            data, _ = _merge_ch_data(data, ch_type, [])
+            data = data.reshape(-1)
         else:
             picks = list(range(data.shape[0]))
             pos = _find_topomap_coords(pos, picks=picks, sphere=sphere)
+
+    _check_option('extrapolate', extrapolate, ('box', 'local', 'head', 'auto'))
+    if extrapolate == 'auto':
+        extrapolate = 'local' if ch_type in _MEG_CH_TYPES_SPLIT else 'head'
 
     if data.ndim > 1:
         raise ValueError("Data needs to be array of shape (n_sensors,); got "
@@ -800,7 +863,7 @@ def _plot_topomap(data, pos, vmin=None, vmax=None, cmap=None, sensors=True,
     if cmap is None:
         cmap = 'Reds' if norm else 'RdBu_r'
 
-    outlines = _make_head_outlines(sphere, pos, outlines, (0., 0.), head_pos)
+    outlines = _make_head_outlines(sphere, pos, outlines, (0., 0.))
     assert isinstance(outlines, dict)
 
     ax = axes if axes else plt.gca()
@@ -828,11 +891,13 @@ def _plot_topomap(data, pos, vmin=None, vmax=None, cmap=None, sensors=True,
         ax.set_clip_path(patch_)
     if _use_default_outlines:
         from matplotlib import patches
-        patch_ = patches.Ellipse(clip_origin,
-                                 2 * clip_radius[0],
-                                 2 * clip_radius[1],
-                                 clip_on=True,
-                                 transform=ax.transData)
+        if extrapolate == 'local':
+            patch_ = patches.Polygon(
+                interp.mask_pts, clip_on=True, transform=ax.transData)
+        else:
+            patch_ = patches.Ellipse(
+                clip_origin, 2 * clip_radius[0], 2 * clip_radius[1],
+                clip_on=True, transform=ax.transData)
 
     # plot interpolated map
     im = ax.imshow(Zi, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower',
@@ -899,12 +964,13 @@ def _plot_topomap(data, pos, vmin=None, vmax=None, cmap=None, sensors=True,
     return im, cont, interp
 
 
-def _plot_ica_topomap(ica, idx=0, ch_type=None, res=64, layout=None,
+def _plot_ica_topomap(ica, idx=0, ch_type=None, res=64,
                       vmin=None, vmax=None, cmap='RdBu_r', colorbar=False,
                       title=None, show=True, outlines='head', contours=6,
-                      image_interp='bilinear', head_pos=None, axes=None,
-                      sensors=True, allow_ref_meg=False, extrapolate='box',
-                      sphere=None, border=0):
+                      image_interp='bilinear', axes=None,
+                      sensors=True, allow_ref_meg=False,
+                      extrapolate=_EXTRAPOLATE_DEFAULT,
+                      sphere=None, border=_BORDER_DEFAULT):
     """Plot single ica map to axes."""
     from matplotlib.axes import Axes
 
@@ -921,21 +987,21 @@ def _plot_ica_topomap(ica, idx=0, ch_type=None, res=64, layout=None,
         return
 
     data = ica.get_components()[:, idx]
-    data_picks, pos, merge_grads, names, _, sphere, clip_origin = \
-        _prepare_topomap_plot(ica, ch_type, layout, sphere=sphere)
+    data_picks, pos, merge_channels, names, _, sphere, clip_origin = \
+        _prepare_topomap_plot(ica, ch_type, sphere=sphere)
     data = data[data_picks]
-    outlines = _make_head_outlines(sphere, pos, outlines, clip_origin,
-                                   head_pos)
+    outlines = _make_head_outlines(sphere, pos, outlines, clip_origin)
 
-    if merge_grads:
-        data = _merge_grad_data(data)
+    if merge_channels:
+        data, names = _merge_ch_data(data, ch_type, names)
+
     axes.set_title(ica._ica_names[idx], fontsize=12)
     vmin_, vmax_ = _setup_vmin_vmax(data, vmin, vmax)
     im = plot_topomap(
         data.ravel(), pos, vmin=vmin_, vmax=vmax_, res=res, axes=axes,
         cmap=cmap, outlines=outlines, contours=contours, sensors=sensors,
         image_interp=image_interp, show=show, extrapolate=extrapolate,
-        head_pos=head_pos, sphere=sphere, border=border)[0]
+        sphere=sphere, border=border)[0]
     if colorbar:
         cbar, cax = _add_colorbar(axes, im, cmap, pad=.05, title="AU",
                                   format='%3.2f')
@@ -946,10 +1012,10 @@ def _plot_ica_topomap(ica, idx=0, ch_type=None, res=64, layout=None,
 
 @fill_doc
 def plot_ica_components(ica, picks=None, ch_type=None, res=64,
-                        layout=None, vmin=None, vmax=None, cmap='RdBu_r',
+                        vmin=None, vmax=None, cmap='RdBu_r',
                         sensors=True, colorbar=False, title=None,
                         show=True, outlines='head', contours=6,
-                        image_interp='bilinear', head_pos=None,
+                        image_interp='bilinear',
                         inst=None, plot_std=True, topomap_args=None,
                         image_args=None, psd_args=None, reject='auto',
                         sphere=None):
@@ -967,7 +1033,6 @@ def plot_ica_components(ica, picks=None, ch_type=None, res=64,
         If None, then channels are chosen in the order given above.
     res : int
         The resolution of the topomap image (n pixels along each side).
-    %(layout_dep)s
     vmin : float | callable | None
         The value specifying the lower bound of the color range.
         If None, and vmax is None, -vmax is used. Else np.min(data).
@@ -1009,7 +1074,6 @@ def plot_ica_components(ica, picks=None, ch_type=None, res=64,
     image_interp : str
         The image interpolation to be used. All matplotlib options are
         accepted.
-    %(topomap_head_pos)s
     inst : Raw | Epochs | None
         To be able to see component properties after clicking on component
         topomap you need to pass relevant data - instances of Raw or Epochs
@@ -1070,13 +1134,12 @@ def plot_ica_components(ica, picks=None, ch_type=None, res=64,
         for k in range(0, n_components, p):
             picks = range(k, min(k + p, n_components))
             fig = plot_ica_components(ica, picks=picks, ch_type=ch_type,
-                                      res=res, layout=layout, vmax=vmax,
+                                      res=res, vmax=vmax,
                                       cmap=cmap, sensors=sensors,
                                       colorbar=colorbar, title=title,
                                       show=show, outlines=outlines,
                                       contours=contours,
-                                      image_interp=image_interp,
-                                      head_pos=head_pos, inst=inst,
+                                      image_interp=image_interp, inst=inst,
                                       plot_std=plot_std,
                                       topomap_args=topomap_args,
                                       image_args=image_args,
@@ -1092,16 +1155,15 @@ def plot_ica_components(ica, picks=None, ch_type=None, res=64,
     data = np.dot(ica.mixing_matrix_[:, picks].T,
                   ica.pca_components_[:ica.n_components_])
 
-    data_picks, pos, merge_grads, names, _, sphere, clip_origin = \
-        _prepare_topomap_plot(ica, ch_type, layout, sphere=sphere)
-    outlines = _make_head_outlines(sphere, pos, outlines, clip_origin,
-                                   head_pos)
+    data_picks, pos, merge_channels, names, _, sphere, clip_origin = \
+        _prepare_topomap_plot(ica, ch_type, sphere=sphere)
+    outlines = _make_head_outlines(sphere, pos, outlines, clip_origin)
 
     data = np.atleast_2d(data)
     data = data[:, data_picks]
 
     # prepare data for iteration
-    fig, axes = _prepare_trellis(len(data), max_col=5)
+    fig, axes, _, _ = _prepare_trellis(len(data), ncols=5)
     if title is None:
         title = 'ICA components'
     fig.suptitle(title)
@@ -1110,13 +1172,13 @@ def plot_ica_components(ica, picks=None, ch_type=None, res=64,
     for ii, data_, ax in zip(picks, data, axes):
         kwargs = dict(color='gray') if ii in ica.exclude else dict()
         titles.append(ax.set_title(ica._ica_names[ii], fontsize=12, **kwargs))
-        data_ = _merge_grad_data(data_) if merge_grads else data_
+        if merge_channels:
+            data_, names_ = _merge_ch_data(data_, ch_type, names.copy())
         vmin_, vmax_ = _setup_vmin_vmax(data_, vmin, vmax)
         im = plot_topomap(
             data_.flatten(), pos, vmin=vmin_, vmax=vmax_, res=res, axes=ax,
             cmap=cmap[0], outlines=outlines, contours=contours,
-            image_interp=image_interp, show=False, sensors=sensors,
-            head_pos=head_pos)[0]
+            image_interp=image_interp, show=False, sensors=sensors)[0]
         im.axes.set_label(ica._ica_names[ii])
         if colorbar:
             cbar, cax = _add_colorbar(ax, im, cmap, title="AU",
@@ -1172,11 +1234,11 @@ def plot_ica_components(ica, picks=None, ch_type=None, res=64,
 
 @fill_doc
 def plot_tfr_topomap(tfr, tmin=None, tmax=None, fmin=None, fmax=None,
-                     ch_type=None, baseline=None, mode='mean', layout=None,
+                     ch_type=None, baseline=None, mode='mean',
                      vmin=None, vmax=None, cmap=None, sensors=True,
                      colorbar=True, unit=None, res=64, size=2,
                      cbar_fmt='%1.1e', show_names=False, title=None,
-                     axes=None, show=True, outlines='head', head_pos=None,
+                     axes=None, show=True, outlines='head',
                      contours=6, sphere=None):
     """Plot topographic maps of specific time-frequency intervals of TFR data.
 
@@ -1220,7 +1282,6 @@ def plot_tfr_topomap(tfr, tmin=None, tmax=None, fmin=None, fmax=None,
             by the standard deviation of the baseline power ('zlogratio')
 
         If None no baseline correction is applied.
-    %(layout_dep)s
     vmin : float | callable | None
         The value specifying the lower bound of the color range.
         If None, and vmax is None, -vmax is used. Else np.min(data) or in case
@@ -1267,7 +1328,6 @@ def plot_tfr_topomap(tfr, tmin=None, tmax=None, fmin=None, fmax=None,
     show : bool
         Show figure if True.
     %(topomap_outlines)s
-    %(topomap_head_pos)s
     contours : int | array of float
         The number of contour lines to draw. If 0, no contours will be drawn.
         When an integer, matplotlib ticker locator is used to find suitable
@@ -1285,10 +1345,9 @@ def plot_tfr_topomap(tfr, tmin=None, tmax=None, fmin=None, fmax=None,
     import matplotlib.pyplot as plt
     ch_type = _get_ch_type(tfr, ch_type)
 
-    picks, pos, merge_grads, names, _, sphere, clip_origin = \
-        _prepare_topomap_plot(tfr, ch_type, layout, sphere=sphere)
-    outlines = _make_head_outlines(sphere, pos, outlines, clip_origin,
-                                   head_pos)
+    picks, pos, merge_channels, names, _, sphere, clip_origin = \
+        _prepare_topomap_plot(tfr, ch_type, sphere=sphere)
+    outlines = _make_head_outlines(sphere, pos, outlines, clip_origin)
 
     if not show_names:
         names = None
@@ -1296,8 +1355,8 @@ def plot_tfr_topomap(tfr, tmin=None, tmax=None, fmin=None, fmax=None,
     data = tfr.data[picks, :, :]
 
     # merging grads before rescaling makes ERDs visible
-    if merge_grads:
-        data = _merge_grad_data(data, method='mean')
+    if merge_channels:
+        data, names = _merge_ch_data(data, ch_type, names, method='mean')
 
     data = rescale(data, tfr.times, baseline, mode, copy=True)
 
@@ -1342,8 +1401,7 @@ def plot_tfr_topomap(tfr, tmin=None, tmax=None, fmin=None, fmax=None,
     fig_wrapper = list()
     selection_callback = partial(_onselect, tfr=tfr, pos=pos, ch_type=ch_type,
                                  itmin=itmin, itmax=itmax, ifmin=ifmin,
-                                 ifmax=ifmax, cmap=cmap[0], fig=fig_wrapper,
-                                 layout=layout)
+                                 ifmax=ifmax, cmap=cmap[0], fig=fig_wrapper)
 
     if not isinstance(contours, (list, np.ndarray)):
         _, contours = _set_contour_locator(vmin, vmax, contours)
@@ -1352,7 +1410,7 @@ def plot_tfr_topomap(tfr, tmin=None, tmax=None, fmin=None, fmax=None,
                          axes=ax, cmap=cmap[0], image_interp='bilinear',
                          contours=contours, names=names, show_names=show_names,
                          show=False, onselect=selection_callback,
-                         sensors=sensors, res=res, head_pos=head_pos,
+                         sensors=sensors, res=res,
                          outlines=outlines, sphere=sphere)
 
     if colorbar:
@@ -1370,15 +1428,17 @@ def plot_tfr_topomap(tfr, tmin=None, tmax=None, fmin=None, fmax=None,
 
 
 @fill_doc
-def plot_evoked_topomap(evoked, times="auto", ch_type=None, layout=None,
+def plot_evoked_topomap(evoked, times="auto", ch_type=None,
                         vmin=None, vmax=None, cmap=None, sensors=True,
                         colorbar=None, scalings=None,
                         units=None, res=64, size=1, cbar_fmt='%3.1f',
                         time_unit='s', time_format=None, proj=False,
                         show=True, show_names=False, title=None, mask=None,
                         mask_params=None, outlines='head', contours=6,
-                        image_interp='bilinear', average=None, head_pos=None,
-                        axes=None, extrapolate='box', sphere=None, border=0):
+                        image_interp='bilinear', average=None,
+                        axes=None, extrapolate=_EXTRAPOLATE_DEFAULT,
+                        sphere=None, border=_BORDER_DEFAULT,
+                        nrows=1, ncols='auto'):
     """Plot topographic maps of specific time points of evoked data.
 
     Parameters
@@ -1397,15 +1457,14 @@ def plot_evoked_topomap(evoked, times="auto", ch_type=None, layout=None,
         The channel type to plot. For 'grad', the gradiometers are collected in
         pairs and the RMS for each pair is plotted.
         If None, then channels are chosen in the order given above.
-    %(layout_dep)s
-    vmin : float | callable | None
-        The value specifying the lower bound of the color range.
-        If None, and vmax is None, -vmax is used. Else np.min(data).
-        If callable, the output equals vmin(data). Defaults to None.
-    vmax : float | callable | None
-        The value specifying the upper bound of the color range.
-        If None, the maximum absolute value is used. If callable, the output
-        equals vmax(data). Defaults to None.
+    vmin, vmax : float | callable | None
+        Lower and upper bounds of the colormap, in the same units as the data.
+        If ``vmin`` and ``vmax`` are both ``None``, they are set at ± the
+        maximum absolute value of the data (yielding a colormap with midpoint
+        at 0). If only one of ``vmin``, ``vmax`` is ``None``, will use
+        ``min(data)`` or ``max(data)``, respectively. If callable, should
+        accept a :class:`NumPy array <numpy.ndarray>` of data and return a
+        float.
     cmap : matplotlib colormap | (colormap, bool) | 'interactive' | None
         Colormap to use. If tuple, the first value indicates the colormap to
         use and the second value is a boolean defining interactivity. In
@@ -1480,7 +1539,7 @@ def plot_evoked_topomap(evoked, times="auto", ch_type=None, layout=None,
         When an integer, matplotlib ticker locator is used to find suitable
         values for the contour thresholds (may sometimes be inaccurate, use
         array for accuracy). If an array, the values represent the levels for
-        the contours. The values are in uV for EEG, fT for magnetometers and
+        the contours. The values are in µV for EEG, fT for magnetometers and
         fT/m for gradiometers. If colorbar=True, the ticks in colorbar
         correspond to the contour levels. Defaults to 6.
     image_interp : str
@@ -1491,7 +1550,6 @@ def plot_evoked_topomap(evoked, times="auto", ch_type=None, layout=None,
         For example, 0.01 would translate into window that starts 5 ms before
         and ends 5 ms after a given time point. Defaults to None, which means
         no averaging.
-    %(topomap_head_pos)s
     axes : instance of Axes | list | None
         The axes to plot to. If list, the list must be a list of Axes of the
         same length as ``times`` (unless ``times`` is None). If instance of
@@ -1502,6 +1560,18 @@ def plot_evoked_topomap(evoked, times="auto", ch_type=None, layout=None,
         .. versionadded:: 0.18
     %(topomap_sphere_auto)s
     %(topomap_border)s
+    nrows : int | 'auto'
+        The number of rows of topographies to plot. Defaults to 1. If 'auto',
+        obtains the number of rows depending on the amount of times to plot
+        and the number of cols. Not valid when times == 'interactive'.
+
+        .. versionadded:: 0.20
+    ncols : int | 'auto'
+        The number of columns of topographies to plot. If 'auto' (default),
+        obtains the number of columns depending on the amount of times to plot
+        and the number of rows. Not valid when times == 'interactive'.
+
+        .. versionadded:: 0.20
 
     Returns
     -------
@@ -1530,10 +1600,9 @@ def plot_evoked_topomap(evoked, times="auto", ch_type=None, layout=None,
     mask_params['markersize'] *= size / 2.
     mask_params['markeredgewidth'] *= size / 2.
 
-    picks, pos, merge_grads, names, ch_type, sphere, clip_origin = \
-        _prepare_topomap_plot(evoked, ch_type, layout, sphere=sphere)
-    outlines = _make_head_outlines(sphere, pos, outlines, clip_origin,
-                                   head_pos)
+    picks, pos, merge_channels, names, ch_type, sphere, clip_origin = \
+        _prepare_topomap_plot(evoked, ch_type, sphere=sphere)
+    outlines = _make_head_outlines(sphere, pos, outlines, clip_origin)
 
     # project before picks
     if proj is True and evoked.proj is not True:
@@ -1549,11 +1618,13 @@ def plot_evoked_topomap(evoked, times="auto", ch_type=None, layout=None,
 
     interactive = isinstance(times, str) and times == 'interactive'
     if axes is not None:
+        nrows, ncols = None, None  # Deactivate ncols when axes were passed
         if isinstance(axes, plt.Axes):
             axes = [axes]
         times = _process_times(evoked, times, n_peaks=len(axes))
     else:
         times = _process_times(evoked, times, n_peaks=None)
+
     space = 1 / (2. * evoked.info['sfreq'])
     if (max(times) > max(evoked.times) + space or
             min(times) < min(evoked.times) - space):
@@ -1561,32 +1632,34 @@ def plot_evoked_topomap(evoked, times="auto", ch_type=None, layout=None,
                          '{:0.3f}.'.format(evoked.times[0], evoked.times[-1]))
     n_times = len(times)
     nax = n_times + bool(colorbar)
-    width = size * nax
-    height = size + max(0, 0.1 * (4 - size)) + bool(title) * 0.5
 
-    cols = n_times + 1 if colorbar else n_times  # room for the colorbar
     if interactive:
         if axes is not None:
             raise ValueError("User provided axes not allowed when "
                              "times='interactive'.")
         height_ratios = [5, 1]
-        rows = 2
+        nrows = 2
+        ncols = n_times + 1 if colorbar else n_times  # room for the colorbar
         g_kwargs = {'left': 0.2, 'right': 1., 'bottom': 0.05, 'top': 0.95}
-    else:
-        rows, height_ratios, g_kwargs = 1, None, {}
-
-    gs = gridspec.GridSpec(rows, cols, height_ratios=height_ratios, **g_kwargs)
-    if axes is None:
+        width = size * nax
+        height = size + max(0, 0.1 * (4 - size)) + bool(title) * 0.5
         figure_nobar(figsize=(width * 1.5, height * 1.5))
-        axes = list()
-        for ax_idx in range(len(times)):
+        gs = gridspec.GridSpec(
+            nrows, ncols, height_ratios=height_ratios, **g_kwargs)
+        axes = []
+        for ax_idx in range(n_times):
             axes.append(plt.subplot(gs[ax_idx]))
-    elif colorbar and colorbar_warn:
-        warn('Colorbar is drawn to the rightmost column of the figure. Be '
-             'sure to provide enough space for it or turn it off with '
-             'colorbar=False.')
-    if len(axes) != n_times:
-        raise RuntimeError('Axes and times must be equal in sizes.')
+    else:
+        if axes is None:
+            fig, axes, ncols, nrows = _prepare_trellis(
+                n_times, ncols=ncols, nrows=nrows, title=title,
+                colorbar=colorbar, size=size)
+        elif len(axes) != n_times:
+            raise RuntimeError('Axes and times must be equal in sizes.')
+        elif colorbar and colorbar_warn:
+            warn('Colorbar is drawn to the rightmost column of the figure. Be '
+                 'sure to provide enough space for it or turn it off with '
+                 'colorbar=False.')
 
     if ch_type.startswith('planar'):
         key = 'grad'
@@ -1596,6 +1669,7 @@ def plot_evoked_topomap(evoked, times="auto", ch_type=None, layout=None,
     scaling = _handle_default('scalings', scalings)[key]
     unit = _handle_default('units', units)[key]
 
+    ch_names = names  # required for nirs processing
     if not show_names:
         names = None
 
@@ -1630,8 +1704,10 @@ def plot_evoked_topomap(evoked, times="auto", ch_type=None, layout=None,
                          'Check your input.')
 
     data *= scaling
-    if merge_grads:
-        data = _merge_grad_data(data)
+    if merge_channels:
+        data, ch_names = _merge_ch_data(data, ch_type, ch_names)
+        if ch_type in _fnirs_types:
+            merge_channels = False
 
     images, contours_ = [], []
 
@@ -1642,7 +1718,7 @@ def plot_evoked_topomap(evoked, times="auto", ch_type=None, layout=None,
         else:  # mag, eeg, planar1, planar2
             mask_ = mask[np.ix_(picks, time_idx)]
 
-    vlims = [_setup_vmin_vmax(data[:, i], vmin, vmax, norm=merge_grads)
+    vlims = [_setup_vmin_vmax(data[:, i], vmin, vmax, norm=merge_channels)
              for i in range(len(times))]
     vmin = np.min(vlims)
     vmax = np.max(vlims)
@@ -1653,26 +1729,30 @@ def plot_evoked_topomap(evoked, times="auto", ch_type=None, layout=None,
 
     kwargs = dict(vmin=vmin, vmax=vmax, sensors=sensors, res=res, names=names,
                   show_names=show_names, cmap=cmap[0], mask_params=mask_params,
-                  outlines=outlines, contours=contours, head_pos=head_pos,
+                  outlines=outlines, contours=contours,
                   image_interp=image_interp, show=False,
-                  extrapolate=extrapolate, sphere=sphere, border=border)
+                  extrapolate=extrapolate, sphere=sphere, border=border,
+                  ch_type=ch_type)
     for idx, time in enumerate(times):
+        ax_idx = idx
+        if colorbar and ncols is not None:
+            ax_idx += idx // (ncols - 1)
         tp, cn, interp = _plot_topomap(
-            data[:, idx], pos, axes=axes[idx],
+            data[:, idx], pos, axes=axes[ax_idx],
             mask=mask_[:, idx] if mask is not None else None, **kwargs)
 
         images.append(tp)
         if cn is not None:
             contours_.append(cn)
         if time_format is not None:
-            axes[idx].set_title(time_format % (time * scaling_time))
+            axes[ax_idx].set_title(time_format % (time * scaling_time))
 
     if interactive:
         axes.append(plt.subplot(gs[2]))
         slider = Slider(axes[-1], 'Time', evoked.times[0], evoked.times[-1],
                         times[0], valfmt='%1.2fs')
         slider.vline.remove()  # remove initial point indicator
-        func = _merge_grad_data if merge_grads else lambda x: x
+        func = _merge_ch_data if merge_channels else lambda x: x
         changed_callback = partial(_slider_changed, ax=axes[0],
                                    data=evoked.data, times=evoked.times,
                                    pos=pos, scaling=scaling, func=func,
@@ -1688,7 +1768,16 @@ def plot_evoked_topomap(evoked, times="auto", ch_type=None, layout=None,
     if colorbar:
         # works both when fig axes pre-defined and when not
         n_fig_axes = max(nax, len(fig.get_axes()))
-        cax = plt.subplot(1, n_fig_axes + 1, n_fig_axes + 1)
+        if nrows is None or ncols is None or interactive:
+            # If nrows or ncols is None, this means axes were given by the user
+            cax = plt.subplot(1, n_fig_axes + 1, n_fig_axes + 1)
+        else:
+            # Use the last axis from first row
+            n_fig_axes = ncols
+            cax = plt.subplot(nrows, ncols, ncols)
+            for i_row in range(2, nrows):
+                _hide_frame(axes[(i_row * ncols) - 1])
+
         # resize the colorbar (by default the color fills the whole axes)
         _resize_cbar(cax, n_fig_axes, size)
         if unit is not None:
@@ -1707,7 +1796,7 @@ def plot_evoked_topomap(evoked, times="auto", ch_type=None, layout=None,
             evoked=evoked, fig=fig, projs=evoked.info['projs'], picks=picks,
             images=images, contours_=contours_, pos=pos, time_idx=time_idx,
             res=res, plot_update_proj_callback=_plot_update_evoked_topomap,
-            merge_grads=merge_grads, scale=scaling, axes=axes,
+            merge_channels=merge_channels, scale=scaling, axes=axes,
             contours=contours, interp=interp, extrapolate=extrapolate)
         _draw_proj_checkbox(None, params)
 
@@ -1743,25 +1832,29 @@ def _slider_changed(val, ax, data, times, pos, scaling, func, time_format,
 def _plot_topomap_multi_cbar(data, pos, ax, title=None, unit=None, vmin=None,
                              vmax=None, cmap=None, outlines='head',
                              colorbar=False, cbar_fmt='%3.3f',
-                             sphere=None):
+                             sphere=None, ch_type='eeg'):
     """Plot topomap multi cbar."""
     _hide_frame(ax)
     vmin = np.min(data) if vmin is None else vmin
     vmax = np.max(data) if vmax is None else vmax
+    # this definition of "norm" allows non-diverging colormap for cases where
+    # min & vmax are both negative (e.g., when they are power in dB)
+    signs = np.sign([vmin, vmax])
+    norm = len(set(signs)) == 1 or np.any(signs == 0)
 
-    cmap = _setup_cmap(cmap)
+    cmap = _setup_cmap(cmap, norm=norm)
     if title is not None:
         ax.set_title(title, fontsize=10)
     im, _ = plot_topomap(data, pos, vmin=vmin, vmax=vmax, axes=ax,
                          cmap=cmap[0], image_interp='bilinear', contours=0,
                          outlines=outlines, show=False, sphere=sphere)
 
-    if colorbar is True:
-        cbar, cax = _add_colorbar(ax, im, cmap, pad=.25, title=None,
+    if colorbar:
+        cbar, cax = _add_colorbar(ax, im, cmap, pad=0.25, title=None,
                                   size="10%", format=cbar_fmt)
         cbar.set_ticks((vmin, vmax))
         if unit is not None:
-            cbar.ax.set_title(unit, fontsize=8)
+            cbar.ax.set_ylabel(unit, fontsize=8)
         cbar.ax.tick_params(labelsize=8)
 
 
@@ -1769,32 +1862,22 @@ def _plot_topomap_multi_cbar(data, pos, ax, title=None, unit=None, vmin=None,
 def plot_epochs_psd_topomap(epochs, bands=None, vmin=None, vmax=None,
                             tmin=None, tmax=None, proj=False,
                             bandwidth=None, adaptive=False, low_bias=True,
-                            normalization='length', ch_type=None, layout=None,
-                            cmap='RdBu_r', agg_fun=None, dB=False, n_jobs=1,
-                            normalize=False, cbar_fmt='%0.3f',
+                            normalization='length', ch_type=None,
+                            cmap=None, agg_fun=None, dB=False, n_jobs=1,
+                            normalize=False, cbar_fmt='auto',
                             outlines='head', axes=None, show=True,
-                            sphere=None, verbose=None):
+                            sphere=None, vlim=(None, None), verbose=None):
     """Plot the topomap of the power spectral density across epochs.
 
     Parameters
     ----------
     epochs : instance of Epochs
         The epochs object.
-    bands : list of tuple | None
-        The lower and upper frequency and the name for that band. If None,
-        (default) expands to:
-
-        bands = [(0, 4, 'Delta'), (4, 8, 'Theta'), (8, 12, 'Alpha'),
-                 (12, 30, 'Beta'), (30, 45, 'Gamma')]
-
-    vmin : float | callable | None
-        The value specifying the lower bound of the color range.
-        If None np.min(data) is used. If callable, the output equals
-        vmin(data).
-    vmax : float | callable | None
-        The value specifying the upper bound of the color range.
-        If None, the maximum absolute value is used. If callable, the output
-        equals vmax(data). Defaults to None.
+    %(psd_topo_bands)s
+    vmin : None
+        Deprecated; use ``vlim`` instead.
+    vmax : None
+        Deprecated; use ``vlim`` instead.
     tmin : float | None
         Start time to consider.
     tmax : float | None
@@ -1819,37 +1902,18 @@ def plot_epochs_psd_topomap(epochs, bands=None, vmin=None, vmax=None,
         pairs and the mean for each pair is plotted. If None, then first
         available channel type from order given above is used. Defaults to
         None.
-    %(layout_dep)s
-    cmap : matplotlib colormap | (colormap, bool) | 'interactive' | None
-        Colormap to use. If tuple, the first value indicates the colormap to
-        use and the second value is a boolean defining interactivity. In
-        interactive mode the colors are adjustable by clicking and dragging the
-        colorbar with left and right mouse button. Left mouse button moves the
-        scale up and down and right mouse button adjusts the range. Hitting
-        space bar resets the range. Up and down arrows can be used to change
-        the colormap. If None (default), 'Reds' is used for all positive data,
-        otherwise defaults to 'RdBu_r'. If 'interactive', translates to
-        (None, True).
-    agg_fun : callable
-        The function used to aggregate over frequencies.
-        Defaults to np.sum. if normalize is True, else np.mean.
-    dB : bool
-        If True, transform data to decibels (with ``10 * np.log10(data)``)
-        following the application of `agg_fun`. Only valid if normalize is
-        False.
+    %(psd_topo_cmap)s
+    %(psd_topo_agg_fun)s
+    %(psd_topo_dB)s
     %(n_jobs)s
-    normalize : bool
-        If True, each band will be divided by the total power. Defaults to
-        False.
-    cbar_fmt : str
-        The colorbar format. Defaults to '%%0.3f'.
+    %(psd_topo_normalize)s
+    %(psd_topo_cbar_fmt)s
     %(topomap_outlines)s
-    axes : list of Axes | None
-        List of axes to plot consecutive topographies to. If None the axes
-        will be created automatically. Defaults to None.
+    %(psd_topo_axes)s
     show : bool
         Show figure if True.
     %(topomap_sphere_auto)s
+    %(psd_topo_vlim_joint)s
     %(verbose)s
 
     Returns
@@ -1858,9 +1922,11 @@ def plot_epochs_psd_topomap(epochs, bands=None, vmin=None, vmax=None,
         Figure distributing one image per channel across sensor topography.
     """
     ch_type = _get_ch_type(epochs, ch_type)
+    units = _handle_default('units', None)
+    unit = units[ch_type]
 
-    picks, pos, merge_grads, names, ch_type, sphere, clip_origin = \
-        _prepare_topomap_plot(epochs, ch_type, layout, sphere=sphere)
+    picks, pos, merge_channels, names, ch_type, sphere, clip_origin = \
+        _prepare_topomap_plot(epochs, ch_type, sphere=sphere)
     outlines = _make_head_outlines(sphere, pos, outlines, clip_origin)
 
     psds, freqs = psd_multitaper(epochs, tmin=tmin, tmax=tmax,
@@ -1870,21 +1936,22 @@ def plot_epochs_psd_topomap(epochs, bands=None, vmin=None, vmax=None,
                                  proj=proj, n_jobs=n_jobs)
     psds = np.mean(psds, axis=0)
 
-    if merge_grads:
-        psds = _merge_grad_data(psds, method='mean')
+    if merge_channels:
+        psds, names = _merge_ch_data(psds, ch_type, names, method='mean')
 
     return plot_psds_topomap(
         psds=psds, freqs=freqs, pos=pos, agg_fun=agg_fun, vmin=vmin,
         vmax=vmax, bands=bands, cmap=cmap, dB=dB, normalize=normalize,
         cbar_fmt=cbar_fmt, outlines=outlines, axes=axes, show=show,
-        sphere=sphere)
+        sphere=sphere, vlim=vlim, unit=unit, ch_type=ch_type)
 
 
 @fill_doc
 def plot_psds_topomap(
         psds, freqs, pos, agg_fun=None, vmin=None, vmax=None, bands=None,
         cmap=None, dB=True, normalize=False, cbar_fmt='%0.3f', outlines='head',
-        axes=None, show=True, sphere=None):
+        axes=None, show=True, sphere=None, vlim=(None, None), unit=None,
+        ch_type='eeg'):
     """Plot spatial maps of PSDs.
 
     Parameters
@@ -1895,68 +1962,65 @@ def plot_psds_topomap(
         Frequencies used to compute psds.
     pos : numpy.ndarray of float, shape (n_sensors, 2)
         The positions of the sensors.
-    agg_fun : callable
-        The function used to aggregate over frequencies.
-        Defaults to np.sum. if normalize is True, else np.mean.
-    vmin : float | callable | None
-        The value specifying the lower bound of the color range.
-        If None np.min(data) is used. If callable, the output equals
-        vmin(data).
-    vmax : float | callable | None
-        The value specifying the upper bound of the color range.
-        If None, the maximum absolute value is used. If callable, the output
-        equals vmax(data). Defaults to None.
-    bands : list of tuple | None
-        The lower and upper frequency and the name for that band. If None,
-        (default) expands to:
-
-            bands = [(0, 4, 'Delta'), (4, 8, 'Theta'), (8, 12, 'Alpha'),
-                     (12, 30, 'Beta'), (30, 45, 'Gamma')]
-
-    cmap : matplotlib colormap | (colormap, bool) | 'interactive' | None
-        Colormap to use. If tuple, the first value indicates the colormap to
-        use and the second value is a boolean defining interactivity. In
-        interactive mode the colors are adjustable by clicking and dragging the
-        colorbar with left and right mouse button. Left mouse button moves the
-        scale up and down and right mouse button adjusts the range. Hitting
-        space bar resets the range. Up and down arrows can be used to change
-        the colormap. If None (default), 'Reds' is used for all positive data,
-        otherwise defaults to 'RdBu_r'. If 'interactive', translates to
-        (None, True).
-    dB : bool
-        If True, transform data to decibels (with ``10 * np.log10(data)``)
-        following the application of `agg_fun`. Only valid if normalize is
-        False.
-    normalize : bool
-        If True, each band will be divided by the total power. Defaults to
-        False.
-    cbar_fmt : str
-        The colorbar format. Defaults to '%%0.3f'.
+    %(psd_topo_agg_fun)s
+    vmin : None
+        Deprecated; use ``vlim`` instead.
+    vmax : None
+        Deprecated; use ``vlim`` instead.
+    %(psd_topo_bands)s
+    %(psd_topo_cmap)s
+    %(psd_topo_dB)s
+    %(psd_topo_normalize)s
+    %(psd_topo_cbar_fmt)s
     %(topomap_outlines)s
-    axes : list of axes | None
-        List of axes to plot consecutive topographies to. If None the axes
-        will be created automatically. Defaults to None.
+    %(psd_topo_axes)s
     show : bool
         Show figure if True.
     %(topomap_sphere)s
+    %(psd_topo_vlim_joint)s
+    unit : str | None
+        Measurement unit to be displayed with the colorbar. If ``None``, no
+        unit is displayed (only "power" or "dB" as appropriate).
+    %(topomap_ch_type)s
 
     Returns
     -------
     fig : instance of matplotlib.figure.Figure
-        Figure distributing one image per channel across sensor topography.
+        Figure with a topomap subplot for each band.
     """
     import matplotlib.pyplot as plt
     sphere = _check_sphere(sphere)
 
+    if cbar_fmt == 'auto':
+        cbar_fmt = '%0.1f' if dB else '%0.3f'
+
+    if vmin is not None or vmax is not None:
+        msg = ('"vmin" and "vmax" are deprecated and will be removed in '
+               'version 0.22. Use "vlim" instead. ')
+        if vlim == (None, None):
+            msg += ('Since you didn\'t specify "vlim", your provided values '
+                    'of "vmin" and "vmax" will be used.')
+            vlim = (vmin, vmax)
+        else:
+            msg += ('Your provided values for "vlim" will be used, and "vmin" '
+                    'and "vmax" will be ignored.')
+        warn(msg, DeprecationWarning)
+
     if bands is None:
-        bands = [(0, 4, 'Delta'), (4, 8, 'Theta'), (8, 12, 'Alpha'),
-                 (12, 30, 'Beta'), (30, 45, 'Gamma')]
+        bands = [(0, 4, 'Delta (0-4 Hz)'), (4, 8, 'Theta (4-8 Hz)'),
+                 (8, 12, 'Alpha (8-12 Hz)'), (12, 30, 'Beta (12-30 Hz)'),
+                 (30, 45, 'Gamma (30-45 Hz)')]
+    else:  # upconvert single freqs to band upper/lower edges as needed
+        bin_spacing = np.diff(freqs)[0]
+        bin_edges = np.array([0, bin_spacing]) - bin_spacing / 2
+        bands = [tuple(bin_edges + freqs[np.argmin(np.abs(freqs - band[0]))]) +
+                 (band[1],) if len(band) == 2 else band for band in bands]
 
     if agg_fun is None:
-        agg_fun = np.sum if normalize is True else np.mean
+        agg_fun = np.sum if normalize else np.mean
 
-    if normalize is True:
-        psds /= psds.sum(axis=-1)[..., None]
+    if normalize:
+        psds /= psds.sum(axis=-1, keepdims=True)
         assert np.allclose(psds.sum(axis=-1), 1.)
 
     n_axes = len(bands)
@@ -1968,22 +2032,41 @@ def plot_psds_topomap(
         if n_axes == 1:
             axes = [axes]
 
+    # handle vmin/vmax
+    if vlim == 'joint':
+        _freq_masks = [(fmin < freqs) & (freqs < fmax)
+                       for (fmin, fmax, _) in bands]
+        _datas = [agg_fun(psds[:, _freq_mask], axis=1)
+                  for _freq_mask in _freq_masks]
+        _datas = [10 * np.log10(_d) if (dB and not normalize) else _d
+                  for _d in _datas]
+        vmin = np.array(_datas).min()
+        vmax = np.array(_datas).max()
+    else:
+        vmin, vmax = vlim
+
+    if unit is None:
+        unit = 'dB' if dB and not normalize else 'power'
+    else:
+        if '/' in unit:
+            unit = '(%s)' % unit
+        unit += '²/Hz'
+        if dB and not normalize:
+            unit += ' (dB)'
+
     for ax, (fmin, fmax, title) in zip(axes, bands):
         freq_mask = (fmin < freqs) & (freqs < fmax)
         if freq_mask.sum() == 0:
             raise RuntimeError('No frequencies in band "%s" (%s, %s)'
                                % (title, fmin, fmax))
         data = agg_fun(psds[:, freq_mask], axis=1)
-        if dB is True and normalize is False:
+        if dB and not normalize:
             data = 10 * np.log10(data)
-            unit = 'dB'
-        else:
-            unit = 'power'
 
         _plot_topomap_multi_cbar(data, pos, ax, title=title, vmin=vmin,
                                  vmax=vmax, cmap=cmap, outlines=outlines,
                                  colorbar=True, unit=unit, cbar_fmt=cbar_fmt,
-                                 sphere=sphere)
+                                 sphere=sphere, ch_type=ch_type)
     tight_layout(fig=fig)
     fig.canvas.draw()
     plt_show(show)
@@ -2121,7 +2204,7 @@ def _hide_frame(ax):
     ax.set_frame_on(False)
 
 
-def _init_anim(ax, ax_line, ax_cbar, params, merge_grads, sphere):
+def _init_anim(ax, ax_line, ax_cbar, params, merge_channels, sphere):
     """Initialize animated topomap."""
     from matplotlib import pyplot as plt, patches
     logger.info('Initializing animation...')
@@ -2136,9 +2219,9 @@ def _init_anim(ax, ax_line, ax_cbar, params, merge_grads, sphere):
                     xlim=all_times[[0, -1]])
         params['line'] = ax_line.axvline(all_times[0], color='r')
         items.append(params['line'])
-    if merge_grads:
-        from mne.channels.layout import _merge_grad_data
-        data = _merge_grad_data(data)
+    if merge_channels:
+        from mne.channels.layout import _merge_ch_data
+        data, _ = _merge_ch_data(data, 'grad', [])
     norm = True if np.min(data) > 0 else False
     cmap = 'Reds' if norm else 'RdBu_r'
 
@@ -2284,7 +2367,7 @@ def _topomap_animation(evoked, ch_type, times, frame_rate, butterfly, blit,
     frames = [np.abs(evoked.times - time).argmin() for time in times]
 
     blit = False if plt.get_backend() == 'MacOSX' else blit
-    picks, pos, merge_grads, _, ch_type, sphere, clip_origin = \
+    picks, pos, merge_channels, _, ch_type, sphere, clip_origin = \
         _prepare_topomap_plot(evoked, ch_type, sphere=sphere)
     data = evoked.data[picks, :]
     data *= _handle_default('scalings')[ch_type]
@@ -2308,7 +2391,7 @@ def _topomap_animation(evoked, ch_type, times, frame_rate, butterfly, blit,
                   pause=False, times=times, time_unit=time_unit,
                   clip_origin=clip_origin)
     init_func = partial(_init_anim, ax=ax, ax_cbar=ax_cbar, ax_line=ax_line,
-                        params=params, merge_grads=merge_grads,
+                        params=params, merge_channels=merge_channels,
                         sphere=sphere)
     animate_func = partial(_animate, ax=ax, ax_line=ax_line, params=params)
     pause_func = partial(_pause_anim, params=params)
@@ -2343,8 +2426,7 @@ def _set_contour_locator(vmin, vmax, contours):
 
 
 def _plot_corrmap(data, subjs, indices, ch_type, ica, label, show, outlines,
-                  layout, cmap, contours, template=False,
-                  sphere=None):
+                  cmap, contours, template=False, sphere=None):
     """Customize ica.plot_components for corrmap."""
     if not template:
         title = 'Detected components'
@@ -2360,22 +2442,21 @@ def _plot_corrmap(data, subjs, indices, ch_type, ica, label, show, outlines,
         n_components = len(picks)
         figs = [_plot_corrmap(data[k:k + p], subjs[k:k + p],
                               indices[k:k + p], ch_type, ica, label, show,
-                              outlines=outlines, layout=layout, cmap=cmap,
-                              contours=contours)
+                              outlines=outlines, cmap=cmap, contours=contours)
                 for k in range(0, n_components, p)]
         return figs
     elif np.isscalar(picks):
         picks = [picks]
 
-    data_picks, pos, merge_grads, names, _, sphere, clip_origin = \
-        _prepare_topomap_plot(ica, ch_type, layout, sphere=sphere)
+    data_picks, pos, merge_channels, names, _, sphere, clip_origin = \
+        _prepare_topomap_plot(ica, ch_type, sphere=sphere)
     outlines = _make_head_outlines(sphere, pos, outlines, clip_origin)
 
     data = np.atleast_2d(data)
     data = data[:, data_picks]
 
     # prepare data for iteration
-    fig, axes = _prepare_trellis(len(picks), max_col=5)
+    fig, axes, _, _ = _prepare_trellis(len(picks), ncols=5)
     fig.suptitle(title)
 
     for ii, data_, ax, subject, idx in zip(picks, data, axes, subjs, indices):
@@ -2384,7 +2465,8 @@ def _plot_corrmap(data, subjs, indices, ch_type, ica, label, show, outlines,
             ax.set_title(ttl, fontsize=12)
         else:
             ax.set_title('Subj. {}'.format(subject))
-        data_ = _merge_grad_data(data_) if merge_grads else data_
+        if merge_channels:
+            data_, _ = _merge_ch_data(data_, ch_type, [])
         vmin_, vmax_ = _setup_vmin_vmax(data_, None, None)
         plot_topomap(data_.flatten(), pos, vmin=vmin_, vmax=vmax_,
                      res=64, axes=ax, cmap=cmap, outlines=outlines,
@@ -2409,12 +2491,12 @@ def _trigradient(x, y, z):
 
 
 @fill_doc
-def plot_arrowmap(data, info_from, info_to=None, scale=1e-10, vmin=None,
+def plot_arrowmap(data, info_from, info_to=None, scale=3e-10, vmin=None,
                   vmax=None, cmap=None, sensors=True, res=64, axes=None,
                   names=None, show_names=False, mask=None, mask_params=None,
                   outlines='head', contours=6, image_interp='bilinear',
-                  show=True, head_pos=None, onselect=None,
-                  extrapolate='box', sphere=None):
+                  show=True, onselect=None, extrapolate=_EXTRAPOLATE_DEFAULT,
+                  sphere=None):
     """Plot arrow map.
 
     Compute arrowmaps, based upon the Hosaka-Cohen transformation [1]_,
@@ -2437,7 +2519,7 @@ def plot_arrowmap(data, info_from, info_to=None, scale=1e-10, vmin=None,
     info_to : instance of Info | None
         The measurement info to interpolate to. If None, it is assumed
         to be the same as info_from.
-    scale : float, default 1e-10
+    scale : float, default 3e-10
         To scale the arrows.
     vmin : float | callable | None
         The value specifying the lower bound of the color range.
@@ -2480,14 +2562,13 @@ def plot_arrowmap(data, info_from, info_to=None, scale=1e-10, vmin=None,
     contours : int | array of float
         The number of contour lines to draw. If 0, no contours will be drawn.
         If an array, the values represent the levels for the contours. The
-        values are in uV for EEG, fT for magnetometers and fT/m for
+        values are in µV for EEG, fT for magnetometers and fT/m for
         gradiometers. Defaults to 6.
     image_interp : str
         The image interpolation to be used. All matplotlib options are
         accepted.
     show : bool
         Show figure if True.
-    %(topomap_head_pos)s
     onselect : callable | None
         Handle for a function that is called when the user selects a set of
         channels by rectangle selection (matplotlib ``RectangleSelector``). If
@@ -2550,7 +2631,7 @@ def plot_arrowmap(data, info_from, info_to=None, scale=1e-10, vmin=None,
     _, pos, _, _, _, sphere, clip_origin = \
         _prepare_topomap_plot(info_to, 'mag', sphere=sphere)
     outlines = _make_head_outlines(
-        sphere, pos, outlines, clip_origin, head_pos)
+        sphere, pos, outlines, clip_origin)
     if axes is None:
         fig, axes = plt.subplots()
     else:
@@ -2559,8 +2640,8 @@ def plot_arrowmap(data, info_from, info_to=None, scale=1e-10, vmin=None,
                  sensors=sensors, res=res, names=names, show_names=show_names,
                  mask=mask, mask_params=mask_params, outlines=outlines,
                  contours=contours, image_interp=image_interp, show=show,
-                 head_pos=head_pos, onselect=onselect, extrapolate=extrapolate,
-                 sphere=sphere)
+                 onselect=onselect, extrapolate=extrapolate, sphere=sphere,
+                 ch_type=ch_type)
     x, y = tuple(pos.T)
     dx, dy = _trigradient(x, y, data)
     dxx = dy.data
