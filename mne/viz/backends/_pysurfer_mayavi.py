@@ -76,6 +76,7 @@ class _Renderer(_BaseRenderer):
             self.fig = _mlab_figure(figure=fig, bgcolor=bgcolor, size=size)
         else:
             self.fig = fig
+        self.fig._window_size = size
         _toggle_mlab_render(self.fig, show)
 
     def subplot(self, x, y):
@@ -92,7 +93,7 @@ class _Renderer(_BaseRenderer):
 
     def mesh(self, x, y, z, triangles, color, opacity=1.0, shading=False,
              backface_culling=False, scalars=None, colormap=None,
-             vmin=None, vmax=None, **kwargs):
+             vmin=None, vmax=None, interpolate_before_map=True, **kwargs):
         if color is not None:
             color = _check_color(color)
         if color is not None and isinstance(color, np.ndarray) \
@@ -115,6 +116,7 @@ class _Renderer(_BaseRenderer):
                                                 vmin=vmin,
                                                 vmax=vmax,
                                                 **kwargs)
+
             if vertex_color is not None:
                 surface.module_manager.scalar_lut_manager.lut.table = \
                     vertex_color
@@ -463,7 +465,7 @@ def _take_3d_screenshot(figure, mode='rgb', filename=None):
     if MNE_3D_BACKEND_TESTING:
         ndim = 3 if mode == 'rgb' else 4
         if figure.scene is None:
-            figure_size = (600, 600)
+            figure_size = figure._window_size
         else:
             figure_size = figure.scene._renwin.size
         return np.zeros(tuple(figure_size) + (ndim,), np.uint8)
