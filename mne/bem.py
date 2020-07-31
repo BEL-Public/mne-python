@@ -63,7 +63,7 @@ class ConductorModel(dict):
         else:
             extra = ('BEM (%s layer%s)' % (len(self['surfs']),
                                            _pl(self['surfs'])))
-        return '<ConductorModel  |  %s>' % extra
+        return '<ConductorModel | %s>' % extra
 
     def copy(self):
         """Return copy of ConductorModel instance."""
@@ -556,7 +556,7 @@ def make_bem_model(subject, ico=4, conductivity=(0.3, 0.006, 0.3),
     -------
     surfaces : list of dict
         The BEM surfaces. Use `make_bem_solution` to turn these into a
-        `ConductorModel` suitable for forward calculation.
+        `~mne.bem.ConductorModel` suitable for forward calculation.
 
     See Also
     --------
@@ -1341,7 +1341,7 @@ def _read_bem_surface(fid, this, def_coord_frame, s_id=None):
     if tag is None:
         raise ValueError('Vertex data not found')
 
-    res['rr'] = tag.data.astype(np.float)  # XXX : double because of mayavi bug
+    res['rr'] = tag.data.astype(np.float64)  # XXX : double because of mayavi
     if res['rr'].shape[0] != res['np']:
         raise ValueError('Vertex information is incorrect')
 

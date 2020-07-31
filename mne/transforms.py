@@ -103,7 +103,7 @@ class Transform(dict):
         self['trans'] = trans
 
     def __repr__(self):  # noqa: D105
-        return ('<Transform  |  %s->%s>\n%s'
+        return ('<Transform | %s->%s>\n%s'
                 % (_coord_frame_name(self['from']),
                    _coord_frame_name(self['to']), self['trans']))
 
@@ -514,7 +514,8 @@ def combine_transforms(t_first, t_second, fro, to):
     return Transform(fro, to, np.dot(t_second['trans'], t_first['trans']))
 
 
-def read_trans(fname, return_all=False):
+@verbose
+def read_trans(fname, return_all=False, verbose=None):
     """Read a -trans.fif file.
 
     Parameters
@@ -526,6 +527,7 @@ def read_trans(fname, return_all=False):
         False (default) will only return the first.
 
         .. versionadded:: 0.15
+    %(verbose)s
 
     Returns
     -------

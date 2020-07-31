@@ -37,7 +37,7 @@ from ..io.meas_info import Info, _simplify_info
 from ..io.proj import Projection
 
 
-_fnirs_types = ('hbo', 'hbr', 'fnirs_raw', 'fnirs_od')
+_fnirs_types = ('hbo', 'hbr', 'fnirs_cw_amplitude', 'fnirs_od')
 
 
 def _adjust_meg_sphere(sphere, info, ch_type):
@@ -321,7 +321,11 @@ def plot_projs_topomap(projs, info, cmap=None, sensors=True,
             types.append(list(these_ch_types)[0])
         data = proj['data']['data'].ravel()
         info_names = _clean_names(info['ch_names'], remove_whitespace=True)
-        use_info = pick_info(info, pick_channels(info_names, ch_names))
+        picks = pick_channels(info_names, ch_names)
+        if len(picks) == 0:
+            raise ValueError(
+                f'No channel names in info match projector {proj}')
+        use_info = pick_info(info, picks)
         data_picks, pos, merge_channels, names, ch_type, this_sphere, \
             clip_origin = _prepare_topomap_plot(
                 use_info, _get_ch_type(use_info, None), sphere=sphere)
@@ -684,7 +688,7 @@ def plot_topomap(data, pos, vmin=None, vmax=None, cmap=None, sensors=True,
         Location information for the data points(/channels).
         If an array, for each data point, the x and y coordinates.
         If an Info object, it must contain only one data type and
-        exactly `len(data)` data channels, and the x/y coordinates will
+        exactly ``len(data)`` data channels, and the x/y coordinates will
         be inferred from this Info object.
     vmin : float | callable | None
         The value specifying the lower bound of the color range.
@@ -707,16 +711,11 @@ def plot_topomap(data, pos, vmin=None, vmax=None, cmap=None, sensors=True,
         The axes to plot to. If None, the current axes will be used.
     names : list | None
         List of channel names. If None, channel names are not plotted.
-    show_names : bool | callable
-        If True, show channel names on top of the map. If a callable is
-        passed, channel names will be formatted using the callable; e.g., to
-        delete the prefix 'MEG ' from all channel names, pass the function
-        lambda x: x.replace('MEG ', ''). If `mask` is not None, only
-        significant sensors will be shown.
-        If `True`, a list of names must be provided (see `names` keyword).
+    %(topomap_show_names)s
+        If ``True``, a list of names must be provided (see ``names`` keyword).
     mask : ndarray of bool, shape (n_channels, n_times) | None
         The channels to be marked as significant at a given time point.
-        Indices set to `True` will be considered. Defaults to None.
+        Indices set to ``True`` will be considered. Defaults to None.
     mask_params : dict | None
         Additional plotting parameters for plotting significant sensors.
         Default (None) equals::
@@ -1315,12 +1314,7 @@ def plot_tfr_topomap(tfr, tmin=None, tmax=None, fmin=None, fmax=None,
         topomaps at a time).
     cbar_fmt : str
         String format for colorbar values.
-    show_names : bool | callable
-        If True, show channel names on top of the map. If a callable is passed,
-        channel names will be formatted using the callable; e.g., to delete the
-        prefix 'MEG ' from all channel names, pass the function
-        ``lambda x: x.replace('MEG ', '')``. If `mask` is not None, only
-        significant sensors will be shown.
+    %(topomap_show_names)s
     title : str | None
         Plot title. If None (default), no title is displayed.
     axes : instance of Axes | None
@@ -1507,18 +1501,10 @@ def plot_evoked_topomap(evoked, times="auto", ch_type=None,
         String format for topomap values. Defaults (None) to "%%01d ms" if
         ``time_unit='ms'``, "%%0.3f s" if ``time_unit='s'``, and
         "%%g" otherwise.
-    proj : bool | 'interactive'
-        If true SSP projections are applied before display. If 'interactive',
-        a check box for reversible selection of SSP projection vectors will
-        be show.
+    %(plot_proj)s
     show : bool
         Show figure if True.
-    show_names : bool | callable
-        If ``True``, show channel names on top of the map. If a callable is
-        passed, channel names will be formatted using the callable; e.g., to
-        delete the prefix 'MEG ' from all channel names, pass the function
-        ``lambda x: x.replace('MEG ', '')``. If ``mask`` is not ``None``, names
-        of significant sensors only will be shown.
+    %(topomap_show_names)s
     title : str | None
         Title. If None (default), no title is displayed.
     mask : ndarray of bool, shape (n_channels, n_times) | None
@@ -1628,10 +1614,13 @@ def plot_evoked_topomap(evoked, times="auto", ch_type=None,
         names = None
     # apply projections before picking. NOTE: the `if proj is True`
     # anti-pattern is needed here to exclude proj='interactive'
+    _check_option('proj', proj, (True, False, 'interactive', 'reconstruct'))
     if proj is True and not evoked.proj:
-        data = evoked.apply_proj().data
-    else:
-        data = evoked.data
+        evoked.apply_proj()
+    elif proj == 'reconstruct':
+        evoked._reconstruct_proj()
+    data = evoked.data
+
     # remove compensation matrices (safe: only plotting & already made copy)
     evoked.info['comps'] = []
     evoked = evoked._pick_drop_channels(picks)
@@ -1776,7 +1765,7 @@ def plot_evoked_topomap(evoked, times="auto", ch_type=None,
             cax.set_title(unit)
         cbar = fig.colorbar(images[-1], ax=cax, cax=cax, format=cbar_fmt)
         if cn is not None:
-            cbar.set_ticks(cn.levels)
+            cbar.set_ticks(contours)
         cbar.ax.tick_params(labelsize=7)
         if cmap[1]:
             for im in images:
@@ -2316,7 +2305,6 @@ def _animate(frame, ax, ax_line, params):
         line.remove()
         ylim = ax_line.get_ylim()
         params['line'] = ax_line.axvline(all_times[time_idx], color='r')
-        print(all_times[time_idx])
         ax_line.set_ylim(ylim)
         items.append(params['line'])
     params['frame'] = frame
@@ -2348,10 +2336,10 @@ def _topomap_animation(evoked, ch_type, times, frame_rate, butterfly, blit,
     if ch_type is None:
         ch_type = _picks_by_type(evoked.info)[0][0]
     if ch_type not in ('mag', 'grad', 'eeg',
-                       'hbo', 'hbr', 'fnirs_od', 'fnirs_raw'):
+                       'hbo', 'hbr', 'fnirs_od', 'fnirs_cw_amplitude'):
         raise ValueError("Channel type not supported. Supported channel "
                          "types include 'mag', 'grad', 'eeg'. 'hbo', 'hbr', "
-                         "'fnirs_raw', and 'fnirs_od'.")
+                         "'fnirs_cw_amplitude', and 'fnirs_od'.")
     time_unit, _ = _check_time_unit(time_unit, evoked.times)
     if times is None:
         times = np.linspace(evoked.times[0], evoked.times[-1], 10)
@@ -2539,16 +2527,11 @@ def plot_arrowmap(data, info_from, info_to=None, scale=3e-10, vmin=None,
         The axes to plot to. If None, a new figure will be created.
     names : list | None
         List of channel names. If None, channel names are not plotted.
-    show_names : bool | callable
-        If True, show channel names on top of the map. If a callable is
-        passed, channel names will be formatted using the callable; e.g., to
-        delete the prefix 'MEG ' from all channel names, pass the function
-        lambda x: x.replace('MEG ', ''). If `mask` is not None, only
-        significant sensors will be shown.
-        If `True`, a list of names must be provided (see `names` keyword).
+    %(topomap_show_names)s
+        If ``True``, a list of names must be provided (see ``names`` keyword).
     mask : ndarray of bool, shape (n_channels, n_times) | None
         The channels to be marked as significant at a given time point.
-        Indices set to `True` will be considered. Defaults to None.
+        Indices set to ``True`` will be considered. Defaults to None.
     mask_params : dict | None
         Additional plotting parameters for plotting significant sensors.
         Default (None) equals::
@@ -2592,7 +2575,7 @@ def plot_arrowmap(data, info_from, info_to=None, scale=3e-10, vmin=None,
        DOI: 10.1016/S0022-0736(76)80041-6
     """
     from matplotlib import pyplot as plt
-    from ..forward import _map_meg_channels
+    from ..forward import _map_meg_or_eeg_channels
 
     sphere = _check_sphere(sphere, info_from)
     ch_type = _picks_by_type(info_from)
@@ -2622,7 +2605,11 @@ def plot_arrowmap(data, info_from, info_to=None, scale=3e-10, vmin=None,
                              "Got %s" % ch_type)
 
     if info_to is not info_from:
-        mapping = _map_meg_channels(info_from, info_to, mode='accurate')
+        info_to = pick_info(info_to, pick_types(info_to, meg=True))
+        info_from = pick_info(info_from, pick_types(info_from, meg=True))
+        # XXX should probably support the "origin" argument
+        mapping = _map_meg_or_eeg_channels(
+            info_from, info_to, origin=(0., 0., 0.04), mode='accurate')
         data = np.dot(mapping, data)
 
     _, pos, _, _, _, sphere, clip_origin = \
@@ -2636,7 +2623,7 @@ def plot_arrowmap(data, info_from, info_to=None, scale=3e-10, vmin=None,
     plot_topomap(data, pos, axes=axes, vmin=vmin, vmax=vmax, cmap=cmap,
                  sensors=sensors, res=res, names=names, show_names=show_names,
                  mask=mask, mask_params=mask_params, outlines=outlines,
-                 contours=contours, image_interp=image_interp, show=show,
+                 contours=contours, image_interp=image_interp, show=False,
                  onselect=onselect, extrapolate=extrapolate, sphere=sphere,
                  ch_type=ch_type)
     x, y = tuple(pos.T)
@@ -2646,5 +2633,6 @@ def plot_arrowmap(data, info_from, info_to=None, scale=3e-10, vmin=None,
     axes.quiver(x, y, dxx, dyy, scale=scale, color='k', lw=1, clip_on=False)
     axes.figure.canvas.draw_idle()
     tight_layout(fig=fig)
+    plt_show(show)
 
     return fig

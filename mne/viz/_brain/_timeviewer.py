@@ -4,12 +4,13 @@
 #
 # License: Simplified BSD
 
-import warnings
+import contextlib
 from functools import partial
 import os
+import sys
 import time
 import traceback
-import sys
+import warnings
 
 import numpy as np
 
@@ -62,6 +63,7 @@ class MplCanvas(object):
         # XXX eventually this should be called in the window resize callback
         tight_layout(fig=self.axes.figure)
         self.time_viewer = time_viewer
+        self.time_func = time_viewer.time_call
         for event in ('button_press', 'motion_notify'):
             self.canvas.mpl_connect(
                 event + '_event', getattr(self, 'on_' + event))
@@ -81,9 +83,26 @@ class MplCanvas(object):
 
     def update_plot(self):
         """Update the plot."""
-        self.axes.legend(prop={'family': 'monospace', 'size': 'small'},
-                         framealpha=0.5, handlelength=1.)
+        leg = self.axes.legend(
+            prop={'family': 'monospace', 'size': 'small'},
+            framealpha=0.5, handlelength=1.,
+            facecolor=self.time_viewer.brain._bg_color)
+        for text in leg.get_texts():
+            text.set_color(self.time_viewer.brain._fg_color)
         self.canvas.draw()
+
+    def set_color(self, bg_color, fg_color):
+        """Set the widget colors."""
+        self.axes.set_facecolor(bg_color)
+        self.axes.xaxis.label.set_color(fg_color)
+        self.axes.yaxis.label.set_color(fg_color)
+        self.axes.spines['top'].set_color(fg_color)
+        self.axes.spines['bottom'].set_color(fg_color)
+        self.axes.spines['left'].set_color(fg_color)
+        self.axes.spines['right'].set_color(fg_color)
+        self.axes.tick_params(axis='x', colors=fg_color)
+        self.axes.tick_params(axis='y', colors=fg_color)
+        self.fig.patch.set_facecolor(bg_color)
 
     def show(self):
         """Show the canvas."""
@@ -99,7 +118,7 @@ class MplCanvas(object):
         if (event.inaxes != self.axes or
                 event.button != 1):
             return
-        self.time_viewer.time_call(
+        self.time_func(
             event.xdata, update_widget=True, time_as_index=False)
 
     on_motion_notify = on_button_press  # for now they can be the same
@@ -175,7 +194,7 @@ class UpdateColorbarScale(object):
 
     def __call__(self, value):
         """Update the colorbar sliders."""
-        self.brain.update_fscale(value)
+        self.brain._update_fscale(value)
         for key in self.keys:
             if self.reps[key] is not None:
                 self.reps[key].SetValue(self.brain._data[key])
@@ -192,9 +211,9 @@ class BumpColorbarPoints(object):
         self.brain = brain
         self.name = name
         self.callback = {
-            "fmin": brain.update_fmin,
-            "fmid": brain.update_fmid,
-            "fmax": brain.update_fmax
+            "fmin": lambda fmin: brain.update_lut(fmin=fmin),
+            "fmid": lambda fmid: brain.update_lut(fmid=fmid),
+            "fmax": lambda fmax: brain.update_lut(fmax=fmax),
         }
         self.keys = ('fmin', 'fmid', 'fmax')
         self.reps = {key: None for key in self.keys}
@@ -205,28 +224,29 @@ class BumpColorbarPoints(object):
         vals = {key: self.brain._data[key] for key in self.keys}
         if self.name == "fmin" and self.reps["fmin"] is not None:
             if vals['fmax'] < value:
-                self.brain.update_fmax(value)
+                vals['fmax'] = value
                 self.reps['fmax'].SetValue(value)
             if vals['fmid'] < value:
-                self.brain.update_fmid(value)
+                vals['fmid'] = value
                 self.reps['fmid'].SetValue(value)
             self.reps['fmin'].SetValue(value)
         elif self.name == "fmid" and self.reps['fmid'] is not None:
             if vals['fmin'] > value:
-                self.brain.update_fmin(value)
+                vals['fmin'] = value
                 self.reps['fmin'].SetValue(value)
             if vals['fmax'] < value:
-                self.brain.update_fmax(value)
+                vals['fmax'] = value
                 self.reps['fmax'].SetValue(value)
             self.reps['fmid'].SetValue(value)
         elif self.name == "fmax" and self.reps['fmax'] is not None:
             if vals['fmin'] > value:
-                self.brain.update_fmin(value)
+                vals['fmin'] = value
                 self.reps['fmin'].SetValue(value)
             if vals['fmid'] > value:
-                self.brain.update_fmid(value)
+                vals['fmid'] = value
                 self.reps['fmid'].SetValue(value)
             self.reps['fmax'].SetValue(value)
+        self.brain.update_lut(**vals)
         if time.time() > self.last_update + 1. / 60.:
             self.callback[self.name](value)
             self.last_update = time.time()
@@ -290,22 +310,8 @@ class _TimeViewer(object):
         from ..backends._pyvista import _require_minimum_version
         _require_minimum_version('0.24')
 
-        # Default configuration
-        self.playback = False
-        self.visibility = False
-        self.refresh_rate_ms = max(int(round(1000. / 60.)), 1)
-        self.default_scaling_range = [0.2, 2.0]
-        self.default_smoothing_range = [0, 15]
-        self.default_playback_speed_range = [0.01, 1]
-        self.default_playback_speed_value = 0.05
-        self.default_status_bar_msg = "Press ? for help"
-        self.act_data = {'lh': None, 'rh': None}
-        self.color_cycle = None
-        self.picked_points = {'lh': list(), 'rh': list()}
-        self._mouse_no_mvt = -1
-        self.icons = dict()
-        self.actions = dict()
-        self.keys = ('fmin', 'fmid', 'fmax')
+        # shared configuration
+        self.brain = brain
         self.orientation = [
             'lateral',
             'medial',
@@ -316,6 +322,31 @@ class _TimeViewer(object):
             'frontal',
             'parietal'
         ]
+        self.default_smoothing_range = [0, 15]
+
+        # detect notebook
+        if brain._notebook:
+            self.notebook = True
+            self.configure_notebook()
+            return
+        else:
+            self.notebook = False
+
+        # Default configuration
+        self.playback = False
+        self.visibility = False
+        self.refresh_rate_ms = max(int(round(1000. / 60.)), 1)
+        self.default_scaling_range = [0.2, 2.0]
+        self.default_playback_speed_range = [0.01, 1]
+        self.default_playback_speed_value = 0.05
+        self.default_status_bar_msg = "Press ? for help"
+        self.act_data_smooth = {'lh': None, 'rh': None}
+        self.color_cycle = None
+        self.picked_points = {'lh': list(), 'rh': list()}
+        self._mouse_no_mvt = -1
+        self.icons = dict()
+        self.actions = dict()
+        self.keys = ('fmin', 'fmid', 'fmax')
         self.slider_length = 0.02
         self.slider_width = 0.04
         self.slider_color = (0.43137255, 0.44313725, 0.45882353)
@@ -323,7 +354,6 @@ class _TimeViewer(object):
         self.slider_tube_color = (0.69803922, 0.70196078, 0.70980392)
 
         # Direct access parameters:
-        self.brain = brain
         self.brain.time_viewer = self
         self.plotter = brain._renderer.plotter
         self.main_menu = self.plotter.main_menu
@@ -344,6 +374,7 @@ class _TimeViewer(object):
             self.separate_canvas = False
 
         self.load_icons()
+        self.interactor_stretch = 3
         self.configure_time_label()
         self.configure_sliders()
         self.configure_scalar_bar()
@@ -355,7 +386,22 @@ class _TimeViewer(object):
 
         # show everything at the end
         self.toggle_interface()
-        self.brain.show()
+        with self.ensure_minimum_sizes():
+            self.brain.show()
+
+    @contextlib.contextmanager
+    def ensure_minimum_sizes(self):
+        sz = self.brain._size
+        adjust_mpl = self.show_traces and not self.separate_canvas
+        if not adjust_mpl:
+            yield
+        else:
+            self.mpl_canvas.canvas.setMinimumSize(
+                sz[0], int(round(sz[1] / self.interactor_stretch)))
+            try:
+                yield
+            finally:
+                self.mpl_canvas.canvas.setMinimumSize(0, 0)
 
     def toggle_interface(self, value=None):
         if value is None:
@@ -444,7 +490,10 @@ class _TimeViewer(object):
 
     @copy_doc(_Brain.save_movie)
     def save_movie(self, filename=None, **kwargs):
-        from pyvista.plotting.qt_plotting import FileDialog
+        try:
+            from pyvista.plotting.qt_plotting import FileDialog
+        except ImportError:
+            from pyvistaqt.plotting import FileDialog
 
         if filename is None:
             self.status_msg.setText("Choose movie path ...")
@@ -535,10 +584,20 @@ class _TimeViewer(object):
             slider_rep.SetTubeWidth(self.slider_tube_width)
             slider_rep.GetSliderProperty().SetColor(self.slider_color)
             slider_rep.GetTubeProperty().SetColor(self.slider_tube_color)
+            slider_rep.GetLabelProperty().SetShadow(False)
+            slider_rep.GetLabelProperty().SetBold(True)
+            slider_rep.GetLabelProperty().SetColor(self.brain._fg_color)
+            slider_rep.GetTitleProperty().ShallowCopy(
+                slider_rep.GetLabelProperty()
+            )
             if not show_cap:
                 slider_rep.GetCapProperty().SetOpacity(0)
             if not show_label:
                 slider_rep.ShowSliderLabelOff()
+
+    def configure_notebook(self):
+        from ._notebook import _NotebookInteractor
+        self.brain._renderer.figure.display = _NotebookInteractor(self)
 
     def configure_time_label(self):
         self.time_actor = self.brain._data.get('time_actor')
@@ -763,65 +822,68 @@ class _TimeViewer(object):
         self.plotter.add_callback(self.play, self.refresh_rate_ms)
 
     def configure_point_picking(self):
+        if not self.show_traces:
+            return
         from ..backends._pyvista import _update_picking_callback
-        if self.show_traces:
-            # use a matplotlib canvas
-            self.color_cycle = _ReuseCycle(_get_color_list())
-            win = self.plotter.app_window
-            dpi = win.windowHandle().screen().logicalDotsPerInch()
-            w, h = win.geometry().width() / dpi, win.geometry().height() / dpi
-            h /= 3  # one third of the window
-            self.mpl_canvas = MplCanvas(self, w, h, dpi)
-            xlim = [np.min(self.brain._data['time']),
-                    np.max(self.brain._data['time'])]
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=UserWarning)
-                self.mpl_canvas.axes.set(xlim=xlim)
-            vlayout = self.plotter.frame.layout()
-            if not self.separate_canvas:
-                vlayout.addWidget(self.mpl_canvas.canvas)
-                vlayout.setStretch(0, 2)
-                vlayout.setStretch(1, 1)
-            self.mpl_canvas.show()
+        # use a matplotlib canvas
+        self.color_cycle = _ReuseCycle(_get_color_list())
+        win = self.plotter.app_window
+        dpi = win.windowHandle().screen().logicalDotsPerInch()
+        w, h = win.geometry().width() / dpi, win.geometry().height() / dpi
+        h /= 3  # one third of the window
+        self.mpl_canvas = MplCanvas(self, w, h, dpi)
+        xlim = [np.min(self.brain._data['time']),
+                np.max(self.brain._data['time'])]
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning)
+            self.mpl_canvas.axes.set(xlim=xlim)
+        vlayout = self.plotter.frame.layout()
+        if not self.separate_canvas:
+            vlayout.addWidget(self.mpl_canvas.canvas)
+            vlayout.setStretch(0, self.interactor_stretch)
+            vlayout.setStretch(1, 1)
+        self.mpl_canvas.set_color(
+            bg_color=self.brain._bg_color,
+            fg_color=self.brain._fg_color,
+        )
+        self.mpl_canvas.show()
 
-            # get brain data
-            for idx, hemi in enumerate(['lh', 'rh']):
-                hemi_data = self.brain._data.get(hemi)
-                if hemi_data is not None:
-                    act_data = hemi_data['array']
-                    if act_data.ndim == 3:
-                        act_data = np.linalg.norm(act_data, axis=1)
-                    smooth_mat = hemi_data['smooth_mat']
-                    if smooth_mat is not None:
-                        act_data = smooth_mat.dot(act_data)
-                    self.act_data[hemi] = act_data
+        # get brain data
+        for idx, hemi in enumerate(['lh', 'rh']):
+            hemi_data = self.brain._data.get(hemi)
+            if hemi_data is not None:
+                act_data = hemi_data['array']
+                if act_data.ndim == 3:
+                    act_data = np.linalg.norm(act_data, axis=1)
+                smooth_mat = hemi_data.get('smooth_mat')
+                self.act_data_smooth[hemi] = (act_data, smooth_mat)
 
-                    # simulate a picked renderer
-                    if self.brain._hemi == 'split':
-                        self.picked_renderer = self.plotter.renderers[idx]
-                    else:
-                        self.picked_renderer = self.plotter.renderers[0]
+                # simulate a picked renderer
+                if self.brain._hemi == 'split':
+                    self.picked_renderer = self.plotter.renderers[idx]
+                else:
+                    self.picked_renderer = self.plotter.renderers[0]
 
-                    # initialize the default point
-                    color = next(self.color_cycle)
-                    ind = np.unravel_index(
-                        np.argmax(self.act_data[hemi], axis=None),
-                        self.act_data[hemi].shape
-                    )
-                    vertex_id = ind[0]
-                    mesh = hemi_data['mesh'][-1]
-                    line = self.plot_time_course(hemi, vertex_id, color)
-                    self.add_point(hemi, mesh, vertex_id, line, color)
+                # initialize the default point
+                color = next(self.color_cycle)
+                ind = np.unravel_index(
+                    np.argmax(self.act_data_smooth[hemi][0], axis=None),
+                    self.act_data_smooth[hemi][0].shape
+                )
+                vertex_id = hemi_data['vertices'][ind[0]]
+                mesh = hemi_data['mesh']
+                line = self.plot_time_course(hemi, vertex_id, color)
+                self.add_point(hemi, mesh, vertex_id, line, color)
 
-            self.plot_time_line()
+        self.plot_time_line()
 
-            _update_picking_callback(
-                self.plotter,
-                self.on_mouse_move,
-                self.on_button_press,
-                self.on_button_release,
-                self.on_pick
-            )
+        _update_picking_callback(
+            self.plotter,
+            self.on_mouse_move,
+            self.on_button_press,
+            self.on_button_release,
+            self.on_pick
+        )
 
     def load_icons(self):
         from PyQt5.QtGui import QIcon
@@ -953,6 +1015,7 @@ class _TimeViewer(object):
                 self.add_point(hemi, mesh, vertex_id, line, color)
 
     def add_point(self, hemi, mesh, vertex_id, line, color):
+        from ..backends._pyvista import _sphere
         center = mesh.GetPoints().GetPoint(vertex_id)
 
         # from the picked renderer to the subplot coords
@@ -963,11 +1026,17 @@ class _TimeViewer(object):
         spheres = list()
         for ri, view in enumerate(self.brain._views):
             self.plotter.subplot(ri, col)
-            actor, sphere = self.brain._renderer.sphere(
+            # Using _sphere() instead of renderer.sphere() for 2 reasons:
+            # 1) renderer.sphere() fails on Windows in a scenario where a lot
+            #    of picking requests are done in a short span of time (could be
+            #    mitigated with synchronization/delay?)
+            # 2) the glyph filter is used in renderer.sphere() but only one
+            #    sphere is required in this function.
+            actor, sphere = _sphere(
+                plotter=self.plotter,
                 center=np.array(center),
                 color=color,
-                scale=1.0,
-                radius=4.0
+                radius=4.0,
             )
             actors.append(actor)
             spheres.append(sphere)
@@ -1013,7 +1082,7 @@ class _TimeViewer(object):
     def plot_time_course(self, hemi, vertex_id, color):
         if not hasattr(self, "mpl_canvas"):
             return
-        time = self.brain._data['time']
+        time = self.brain._data['time'].copy()  # avoid circular ref
         hemi_str = 'L' if hemi == 'lh' else 'R'
         hemi_int = 0 if hemi == 'lh' else 1
         mni = vertex_to_mni(
@@ -1025,9 +1094,14 @@ class _TimeViewer(object):
         label = "{}:{} MNI: {}".format(
             hemi_str, str(vertex_id).ljust(6),
             ', '.join('%5.1f' % m for m in mni))
+        act_data, smooth = self.act_data_smooth[hemi]
+        if smooth is not None:
+            act_data = smooth[vertex_id].dot(act_data)[0]
+        else:
+            act_data = act_data[vertex_id].copy()
         line = self.mpl_canvas.plot(
             time,
-            self.act_data[hemi][vertex_id, :],
+            act_data,
             label=label,
             lw=1.,
             color=color
@@ -1044,7 +1118,7 @@ class _TimeViewer(object):
                 self.time_line = self.mpl_canvas.plot_time_line(
                     x=current_time,
                     label='time',
-                    color='black',
+                    color=self.brain._fg_color,
                     lw=1,
                 )
             else:
@@ -1111,41 +1185,63 @@ class _TimeViewer(object):
         self.interactor = None
         if hasattr(self, "mpl_canvas"):
             self.mpl_canvas.close()
+            self.mpl_canvas.axes.clear()
+            self.mpl_canvas.fig.clear()
             self.mpl_canvas.time_viewer = None
             self.mpl_canvas.canvas = None
             self.mpl_canvas = None
         self.time_actor = None
         self.picked_renderer = None
-        self.act_data["lh"] = None
-        self.act_data["rh"] = None
-        self.act_data = None
+        self.act_data_smooth["lh"] = None
+        self.act_data_smooth["rh"] = None
+        self.act_data_smooth = None
 
 
 class _LinkViewer(object):
     """Class to link multiple _TimeViewer objects."""
 
-    def __init__(self, brains):
+    def __init__(self, brains, time=True, camera=False):
         self.brains = brains
         self.time_viewers = [brain.time_viewer for brain in brains]
 
-        # link time sliders
-        self.link_sliders(
-            name="_time_slider",
-            callback=self.set_time_point,
-            event_type="always"
-        )
+        # check time infos
+        times = [brain._times for brain in brains]
+        if time and not all(np.allclose(x, times[0]) for x in times):
+            warn('stc.times do not match, not linking time')
+            time = False
 
-        # link playback speed sliders
-        self.link_sliders(
-            name="_playback_speed_slider",
-            callback=self.set_playback_speed,
-            event_type="always"
-        )
+        if camera:
+            self.link_cameras()
 
-        # link toggle to start/pause playback
-        for time_viewer in self.time_viewers:
-            time_viewer.actions["play"].triggered.disconnect()
-            time_viewer.actions["play"].triggered.connect(self.toggle_playback)
+        if time:
+            # link time sliders
+            self.link_sliders(
+                name="_time_slider",
+                callback=self.set_time_point,
+                event_type="always"
+            )
+
+            # link playback speed sliders
+            self.link_sliders(
+                name="_playback_speed_slider",
+                callback=self.set_playback_speed,
+                event_type="always"
+            )
+
+            # link toggle to start/pause playback
+            for time_viewer in self.time_viewers:
+                time_viewer.actions["play"].triggered.disconnect()
+                time_viewer.actions["play"].triggered.connect(
+                    self.toggle_playback)
+
+            # link time course canvas
+            def _func(*args, **kwargs):
+                for time_viewer in self.time_viewers:
+                    time_viewer.time_call(*args, **kwargs)
+
+            for time_viewer in self.time_viewers:
+                if time_viewer.show_traces:
+                    time_viewer.mpl_canvas.time_func = _func
 
     def set_time_point(self, value):
         for time_viewer in self.time_viewers:
@@ -1156,8 +1252,8 @@ class _LinkViewer(object):
             time_viewer.playback_speed_call(value, update_widget=True)
 
     def toggle_playback(self):
-        master = self.time_viewers[0]  # select a master time_viewer
-        value = master.time_call.slider_rep.GetValue()
+        leader = self.time_viewers[0]  # select a time_viewer as leader
+        value = leader.time_call.slider_rep.GetValue()
         # synchronize starting points before playback
         self.set_time_point(value)
         for time_viewer in self.time_viewers:
@@ -1173,6 +1269,20 @@ class _LinkViewer(object):
                     callback=callback,
                     event_type=event_type
                 )
+
+    def link_cameras(self):
+        from ..backends._pyvista import _add_camera_callback
+
+        def _update_camera(vtk_picker, event):
+            for time_viewer in self.time_viewers:
+                time_viewer.plotter.update()
+
+        leader = self.time_viewers[0]  # select a time_viewer as leader
+        camera = leader.plotter.camera
+        _add_camera_callback(camera, _update_camera)
+        for time_viewer in self.time_viewers:
+            for renderer in time_viewer.plotter.renderers:
+                renderer.camera = camera
 
 
 def _get_range(brain):

@@ -28,7 +28,7 @@ from .utils import (_toggle_options, _toggle_proj, _prepare_mne_browse,
                     _change_channel_group, _plot_annotations, _setup_butterfly,
                     _handle_decim, _setup_plot_projector, _check_cov,
                     _set_ax_label_style, _draw_vert_line, _simplify_float,
-                    _check_psd_fmax)
+                    _check_psd_fmax, _set_window_title)
 
 
 def _plot_update_raw_proj(params, bools):
@@ -350,7 +350,7 @@ def plot_raw(raw, events=None, duration=10.0, start=0.0, n_channels=20,
     for t in ['grad', 'mag']:
         inds += [pick_types(info, meg=t, ref_meg=False, exclude=[])]
         types += [t] * len(inds[-1])
-    for t in ['hbo', 'hbr', 'fnirs_raw', 'fnirs_od']:
+    for t in ['hbo', 'hbr', 'fnirs_cw_amplitude', 'fnirs_od']:
         inds += [pick_types(info, meg=False, ref_meg=False, fnirs=t,
                             exclude=[])]
         types += [t] * len(inds[-1])
@@ -664,7 +664,7 @@ def _prepare_mne_browse_raw(params, title, bgcolor, color, bad_color, inds,
 
     figsize = _get_figsize_from_config()
     params['fig'] = figure_nobar(facecolor=bgcolor, figsize=figsize)
-    params['fig'].canvas.set_window_title(title or "Raw")
+    _set_window_title(params['fig'], title or "Raw")
     # most of the axes setup is done in _prepare_mne_browse
     _prepare_mne_browse(params, xlabel='Time (s)')
     ax = params['ax']
@@ -733,7 +733,9 @@ def _prepare_mne_browse_raw(params, title, bgcolor, color, bad_color, inds,
 
     params['lines'] = [ax.plot([np.nan], antialiased=True, linewidth=0.5)[0]
                        for _ in range(n_ch)]
-    ax.set_yticklabels(['X' * max([len(ch) for ch in info['ch_names']])])
+    ax.set_yticklabels(
+        ['X' * max([len(ch) for ch in info['ch_names']])] *
+        len(params['offsets']))
     params['fig_annotation'] = None
     params['fig_help'] = None
     params['segment_line'] = None
@@ -924,6 +926,7 @@ def _plot_raw_traces(params, color, bad_color, event_lines=None,
                           params['times'][0] + params['first_time'] +
                           params['duration'], False)
     if not butterfly:
+        params['ax'].set_yticks(params['offsets'][:len(tick_list)])
         params['ax'].set_yticklabels(tick_list, rotation=0)
         _set_ax_label_style(params['ax'], params)
     if 'fig_selection' not in params:
@@ -1077,7 +1080,7 @@ def _setup_browser_selection(raw, kind, selector=True):
     if not selector:
         return order
     fig_selection = figure_nobar(figsize=(2, 6), dpi=80)
-    fig_selection.canvas.set_window_title('Selection')
+    _set_window_title(fig_selection, 'Selection')
     rax = plt.subplot2grid((6, 1), (2, 0), rowspan=4, colspan=1)
     topo_ax = plt.subplot2grid((6, 1), (0, 0), rowspan=2, colspan=1)
     keys = np.concatenate([keys, ['Custom']])

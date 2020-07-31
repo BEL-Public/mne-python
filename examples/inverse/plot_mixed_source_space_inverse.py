@@ -3,7 +3,7 @@
 Compute MNE inverse solution on evoked data in a mixed source space
 ===================================================================
 
-Create a mixed source space and compute MNE inverse solution on an
+Create a mixed source space and compute an MNE inverse solution on an
 evoked dataset.
 """
 # Author: Annalisa Pascarella <a.pascarella@iac.cnr.it>
@@ -79,6 +79,8 @@ n = sum(src[i]['nuse'] for i in range(len(src)))
 print('the src space contains %d spaces and %d points' % (len(src), n))
 
 ###############################################################################
+# Viewing the source space
+# ------------------------
 # We could write the mixed source space with::
 #
 #    >>> write_source_spaces(fname_mixed_src, src, overwrite=True)
@@ -87,7 +89,6 @@ print('the src space contains %d spaces and %d points' % (len(src), n))
 
 nii_fname = op.join(bem_dir, '%s-mixed-src.nii' % subject)
 src.export_volume(nii_fname, mri_resolution=True, overwrite=True)
-
 plotting.plot_img(nii_fname, cmap='nipy_spectral')
 
 ###############################################################################
@@ -117,11 +118,12 @@ noise_cov = mne.read_cov(fname_cov)
 snr = 3.0            # use smaller SNR for raw data
 inv_method = 'dSPM'  # sLORETA, MNE, dSPM
 parc = 'aparc'       # the parcellation to use, e.g., 'aparc' 'aparc.a2009s'
+loose = dict(surface=0.2, volume=1.)
 
 lambda2 = 1.0 / snr ** 2
 
-inverse_operator = make_inverse_operator(evoked.info, fwd, noise_cov,
-                                         depth=None, fixed=False)
+inverse_operator = make_inverse_operator(
+    evoked.info, fwd, noise_cov, depth=None, loose=loose, verbose=True)
 
 stc = apply_inverse(evoked, inverse_operator, lambda2, inv_method,
                     pick_ori=None)

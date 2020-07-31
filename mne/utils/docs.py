@@ -4,6 +4,7 @@
 #
 # License: BSD (3-clause)
 
+from copy import deepcopy
 import inspect
 import os
 import os.path as op
@@ -69,6 +70,17 @@ tmax : float
 docdict["show"] = """
 show : bool
     Show figure if True."""
+docdict["plot_proj"] = """
+proj : bool | 'interactive' | 'reconstruct'
+    If true SSP projections are applied before display. If 'interactive',
+    a check box for reversible selection of SSP projection vectors will
+    be shown. If 'reconstruct', projection vectors will be applied and then
+    M/EEG data will be reconstructed via field mapping to reduce the signal
+    bias caused by projection.
+
+    .. versionchanged:: 0.21
+       Support for 'reconstruct' was added.
+"""
 docdict['topomap_outlines'] = """
 outlines : 'head' | 'skirt' | dict | None
     The outlines to be drawn. If 'head', the default head scheme will be
@@ -142,6 +154,14 @@ ch_type : str
     extrapolation mode.
 
     .. versionadded:: 0.21
+"""
+docdict['topomap_show_names'] = """
+show_names : bool | callable
+    If True, show channel names on top of the map. If a callable is
+    passed, channel names will be formatted using the callable; e.g., to
+    delete the prefix 'MEG ' from all channel names, pass the function
+    ``lambda x: x.replace('MEG ', '')``. If ``mask`` is not None, only
+    significant sensors will be shown.
 """
 
 # PSD topomaps
@@ -470,7 +490,7 @@ bad_condition : str
 head_pos : array | None
     If array, movement compensation will be performed.
     The array should be of shape (N, 10), holding the position
-    parameters as returned by e.g. `read_head_pos`.
+    parameters as returned by e.g. ``read_head_pos``.
 """
 docdict['maxwell_st_fixed_only'] = """
 st_fixed : bool
@@ -512,6 +532,13 @@ skip_by_annotation : str | list of str
     any segments that were concatenated by :func:`mne.concatenate_raws`
     or :meth:`mne.io.Raw.append`, or separated during acquisition.
     To disable, provide an empty list.
+"""
+docdict['maxwell_extended'] = """
+extended_proj : list
+    The empty-room projection vectors used to extend the external
+    SSS basis (i.e., use eSSS).
+
+    .. versionadded:: 0.21
 """
 
 # Rank
@@ -555,13 +582,28 @@ depth : None | float | dict
     How to weight (or normalize) the forward using a depth prior.
     If float (default 0.8), it acts as the depth weighting exponent (``exp``)
     to use, which must be between 0 and 1. None is equivalent to 0, meaning
-    no depth weighting is performed. It can also be a `dict` containing
-    keyword arguments to pass to :func:`mne.forward.compute_depth_prior`
-    (see docstring for details and defaults). This is effectively ignored
-    when ``method='eLORETA'``.
+    no depth weighting is performed. It can also be a :class:`dict`
+    containing keyword arguments to pass to
+    :func:`mne.forward.compute_depth_prior` (see docstring for details and
+    defaults). This is effectively ignored when ``method='eLORETA'``.
 
     .. versionchanged:: 0.20
        Depth bias ignored for ``method='eLORETA'``.
+"""
+docdict['loose'] = """
+loose : float | 'auto' | dict
+    Value that weights the source variances of the dipole components
+    that are parallel (tangential) to the cortical surface. Can be:
+
+    - float between 0 and 1 (inclusive)
+        If 0, then the solution is computed with fixed orientation.
+        If 1, it corresponds to free orientations.
+    - ``'auto'`` (default)
+        Uses 0.2 for surface source spaces (unless ``fixed`` is True) and
+        1.0 for other source spaces (volume or mixed).
+    - dict
+        Mapping from the key for a given source space type (surface, volume,
+        discrete) to the loose value. Useful mostly for mixed source spaces.
 """
 _pick_ori_novec = """
     Options:
@@ -595,6 +637,64 @@ reduce_rank : bool
     .. versionchanged:: 0.20
         Support for reducing rank in all modes (previously only supported
         ``pick='max_power'`` with weight normalization).
+"""
+docdict['weight_norm'] = """
+weight_norm : str | None
+    Can be:
+
+    - ``None``
+        The unit-gain LCMV beamformer :footcite:`SekiharaNagarajan2008` will be
+        computed.
+    - ``'unit-noise-gain'``
+        The unit-noise gain minimum variance beamformer will be computed
+        (Borgiotti-Kaplan beamformer) :footcite:`SekiharaNagarajan2008`,
+        which is not rotation invariant when ``pick_ori='vector'``.
+        This should be combined with
+        :meth:`stc.project('pca') <mne.VectorSourceEstimate.project>` to follow
+        the definition in :footcite:`SekiharaNagarajan2008`.
+    - ``'nai'``
+        The Neural Activity Index :footcite:`VanVeenEtAl1997` will be computed,
+        which simply scales all values from ``'unit-noise-gain'`` by a fixed
+        value.
+    - ``'unit-noise-gain-invariante'``
+        Compute a rotation-invariant normalization using the matrix square
+        root. This differs from ``'unit-noise-gain'`` only when
+        ``pick_ori='vector'``, creating a solution that:
+
+        1. Is rotation invariant (``'unit-noise-gain'`` is not);
+        2. Satisfies the first requirement from
+           :footcite:`SekiharaNagarajan2008` that ``w @ w.conj().T == I``,
+           whereas ``'unit-noise-gain'`` has non-zero off-diagonals; but
+        3. Does not satisfy the second requirement that ``w @ G.T = θI``,
+           which arguably does not make sense for a rotation-invariant
+           solution.
+"""
+docdict['bf_pick_ori'] = """
+pick_ori : None | str
+    For forward solutions with fixed orientation, None (default) must be
+    used and a scalar beamformer is computed. For free-orientation forward
+    solutions, a vector beamformer is computed and:
+
+    - ``None``
+        Orientations are pooled after computing a vector beamformer (Default).
+    - ``'normal'``
+        Filters are computed for the orientation tangential to the
+        cortical surface.
+    - ``'max-power'``
+        Filters are computed for the orientation that maximizes power.
+"""
+docdict['bf_inversion'] = """
+inversion : 'single' | 'matrix'
+    This determines how the beamformer deals with source spaces in "free"
+    orientation. Such source spaces define three orthogonal dipoles at each
+    source point. When ``inversion='single'``, each dipole is considered
+    as an individual source and the corresponding spatial filter is
+    computed for each dipole separately. When ``inversion='matrix'``, all
+    three dipoles at a source vertex are considered as a group and the
+    spatial filters are computed jointly using a matrix inversion. While
+    ``inversion='single'`` is more stable, ``inversion='matrix'`` is more
+    precise. See section 5 of :footcite:`vanVlietEtAl2018`.
+    Defaults to ``'matrix'``.
 """
 docdict['use_cps'] = """
 use_cps : bool
@@ -660,7 +760,7 @@ head_pos : None | str | dict | tuple | array
     be the time points and entries should be 4x4 ``dev_head_t``
     matrices. If None, the original head position (from
     ``info['dev_head_t']``) will be used. If tuple, should have the
-    same format as data returned by `head_pos_to_trans_rot_t`.
+    same format as data returned by ``head_pos_to_trans_rot_t``.
     If array, should be of the form returned by
     :func:`mne.chpi.read_head_pos`.
 """
@@ -716,9 +816,9 @@ indicate the boundaries of the filter (--). The line noise frequency is
 also indicated with a dashed line (-.)
 """
 docdict['plot_psd_picks_good_data'] = docdict['picks_good_data'][:-2] + """
-    Cannot be None if `ax` is supplied.If both `picks` and `ax` are None
+    Cannot be None if ``ax`` is supplied.If both ``picks`` and ``ax`` are None
     separate subplots will be created for each standard channel type
-    (`mag`, `grad`, and `eeg`).
+    (``mag``, ``grad``, and ``eeg``).
 """
 docdict["plot_psd_color"] = """
 color : str | tuple
@@ -908,7 +1008,7 @@ docdict["show_traces"] = """
 show_traces : bool | str
     If True, enable interactive picking of a point on the surface of the
     brain and plot it's time course using the bottom 1/3 of the figure.
-    This feature is only available with the PyVista 3d backend when
+    This feature is only available with the PyVista 3d backend, and requires
     ``time_viewer=True``. Defaults to 'auto', which will use True if and
     only if ``time_viewer=True``, the backend is PyVista, and there is more
     than one time point.
@@ -1071,20 +1171,20 @@ stat_fun : callable | None
 """
 docdict['clust_stat_f'] = docdict['clust_stat'].format('f_oneway')
 docdict['clust_stat_t'] = docdict['clust_stat'].format('ttest_1samp_no_p')
-docdict['clust_con'] = """
-connectivity : scipy.sparse.spmatrix | None | False
-    Defines connectivity between locations in the data, where "locations" can
+docdict['clust_adj'] = """
+adjacency : scipy.sparse.spmatrix | None | False
+    Defines adjacency between locations in the data, where "locations" can
     be spatial vertices, frequency bins, etc. If ``False``, assumes no
-    connectivity (each location is treated as independent and unconnected).
-    If ``None``, a regular lattice connectivity is assumed, connecting
+    adjacency (each location is treated as independent and unconnected).
+    If ``None``, a regular lattice adjacency is assumed, connecting
     each {sp} location to its neighbor(s) along the last dimension
     of {{eachgrp}} ``{{x}}``{lastdim}.
-    If ``connectivity`` is a matrix, it is assumed to be symmetric (only the
+    If ``adjacency`` is a matrix, it is assumed to be symmetric (only the
     upper triangular half is used) and must be square with dimension equal to
     ``{{x}}.shape[-1]`` {parone} or ``{{x}}.shape[-1] * {{x}}.shape[-2]``
     {partwo}.{memory}
 """
-mem = (' If spatial connectivity is uniform in time, it is recommended to use '
+mem = (' If spatial adjacency is uniform in time, it is recommended to use '
        'a square matrix with dimension ``{x}.shape[-1]`` (n_vertices) to save '
        'memory and computation, and to use ``max_step`` to define the extent '
        'of temporal adjacency to consider when clustering.')
@@ -1094,10 +1194,14 @@ tf = dict(sp='', lastdim=' (or the last two dimensions if ``{x}`` is 2D)',
           parone='', partwo='', memory='')
 nogroups = dict(eachgrp='', x='X')
 groups = dict(eachgrp='each group ', x='X[k]')
-docdict['clust_con_st1'] = docdict['clust_con'].format(**st).format(**nogroups)
-docdict['clust_con_stn'] = docdict['clust_con'].format(**st).format(**groups)
-docdict['clust_con_1'] = docdict['clust_con'].format(**tf).format(**nogroups)
-docdict['clust_con_n'] = docdict['clust_con'].format(**tf).format(**groups)
+docdict['clust_adj_st1'] = docdict['clust_adj'].format(**st).format(**nogroups)
+docdict['clust_adj_stn'] = docdict['clust_adj'].format(**st).format(**groups)
+docdict['clust_adj_1'] = docdict['clust_adj'].format(**tf).format(**nogroups)
+docdict['clust_adj_n'] = docdict['clust_adj'].format(**tf).format(**groups)
+docdict['clust_con_dep'] = """
+connectivity : None
+    Deprecated and will be removed in 0.22, use ``adjacency`` instead.
+"""
 docdict['clust_maxstep'] = """
 max_step : int
     Maximum distance along the second dimension (typically this is the "time"
@@ -1223,6 +1327,61 @@ title : str | None
     The title of the figure if ``mode='orthoview'`` (ignored for all other
     modes). If ``None``, dipole number and its properties (amplitude,
     orientation etc.) will be shown. Defaults to ``None``.
+"""
+
+# TFRs
+docdict['tfr_average'] = """
+average : bool, default True
+    If ``False`` return an `EpochsTFR` containing separate TFRs for each
+    epoch. If ``True`` return an `AverageTFR` containing the average of all
+    TFRs across epochs.
+
+    .. note::
+        Using ``average=True`` is functionally equivalent to using
+        ``average=False`` followed by ``EpochsTFR.average()``, but is
+        more memory efficient.
+
+    .. versionadded:: 0.13.0
+"""
+
+# Anonymization
+docdict['anonymize_info_parameters'] = """
+daysback : int | None
+    Number of days to subtract from all dates.
+    If ``None`` (default), the acquisition date, ``info['meas_date']``,
+    will be set to ``January 1ˢᵗ, 2000``. This parameter is ignored if
+    ``info['meas_date']`` is ``None`` (i.e., no acquisition date has been set).
+keep_his : bool
+    If ``True``, ``his_id`` of ``subject_info`` will **not** be overwritten.
+    Defaults to ``False``.
+
+    .. warning:: This could mean that ``info`` is not fully
+                 anonymized. Use with caution.
+"""
+docdict['anonymize_info_notes'] = """
+Removes potentially identifying information if it exists in ``info``.
+Specifically for each of the following we use:
+
+- meas_date, file_id, meas_id
+        A default value, or as specified by ``daysback``.
+- subject_info
+        Default values, except for 'birthday' which is adjusted
+        to maintain the subject age.
+- experimenter, proj_name, description
+        Default strings.
+- utc_offset
+        ``None``.
+- proj_id
+        Zeros.
+- proc_history
+        Dates use the ``meas_date`` logic, and experimenter a default string.
+- helium_info, device_info
+        Dates use the ``meas_date`` logic, meta info uses defaults.
+
+If ``info['meas_date']`` is ``None``, it will remain ``None`` during processing
+the above fields.
+
+Operates in place.
 """
 
 # Finalize
@@ -1644,3 +1803,17 @@ class deprecated(object):
             newdoc = "%s\n\n%s%s" % (newdoc, ' ' * n_space, olddoc)
 
         return newdoc
+
+
+def deprecated_alias(dep_name, func, removed_in=None):
+    """Inject a deprecated alias into the namespace."""
+    if removed_in is None:
+        from .._version import __version__
+        removed_in = __version__.split('.')[:2]
+        removed_in[1] = str(int(removed_in[1]) + 1)
+        removed_in = '.'.join(removed_in)
+    # Inject a deprecated version into the namespace
+    inspect.currentframe().f_back.f_globals[dep_name] = deprecated(
+        f'{dep_name} has been deprecated in favor of {func.__name__} and will '
+        f'be removed in {removed_in}'
+    )(deepcopy(func))

@@ -63,7 +63,6 @@ def _read_header(fid):
         for event in range(info['n_events']):
             event_codes = ''.join(np.fromfile(fid, 'S1', 4).astype('U1'))
             info['event_codes'].append(event_codes)
-        info['event_codes'] = np.array(info['event_codes'])
     else:
         raise NotImplementedError('Only continuous files are supported')
     info['unsegmented'] = unsegmented
@@ -107,7 +106,7 @@ def read_raw_egi(input_fname, eog=None, misc=None,
     include : None | list
        The event channels to be ignored when creating the synthetic
        trigger. Defaults to None.
-       Note. Overrides `exclude` parameter.
+       Note. Overrides ``exclude`` parameter.
     exclude : None | list
        The event channels to be ignored when creating the synthetic
        trigger. Defaults to None. If None, channels that have more than
@@ -246,7 +245,7 @@ class RawEGI(BaseRaw):
         sti_ch_idx = [i for i, name in enumerate(ch_names) if
                       name.startswith('STI') or name in event_codes]
         for idx in sti_ch_idx:
-            chs[idx].update({'unit_mul': 0, 'cal': 1,
+            chs[idx].update({'unit_mul': FIFF.FIFF_UNITM_NONE, 'cal': 1.,
                              'kind': FIFF.FIFFV_STIM_CH,
                              'coil_type': FIFF.FIFFV_COIL_NONE,
                              'unit': FIFF.FIFF_UNIT_NONE})

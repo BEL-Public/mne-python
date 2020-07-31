@@ -122,6 +122,11 @@ blockquote {
   border-radius: 0 0 4px 4px !important;
 }
 
+.devbar a {
+    color: #fff;
+    font-weight: bold;
+}
+
 .pad-top-30 {
   padding-top: 30px;
 }
@@ -549,4 +554,8 @@ div[id^="mne-"] h1 {
 }
 div[id^="examples-using-"] h2 {
   word-break: break-word;
+}
+/* Avoid awkward extra spacing in .. contents:: */
+div.contents ul li p {
+  margin: 0 0 0px;
 }

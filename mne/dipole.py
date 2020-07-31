@@ -112,7 +112,7 @@ class Dipole(object):
         s = "n_times : %s" % len(self.times)
         s += ", tmin : %0.3f" % np.min(self.times)
         s += ", tmax : %0.3f" % np.max(self.times)
-        return "<Dipole  |  %s>" % s
+        return "<Dipole | %s>" % s
 
     def save(self, fname, overwrite=False):
         """Save dipole in a .dip or .bdip file.
@@ -396,7 +396,7 @@ class DipoleFixed(ShiftTimeMixin):
         s = "n_times : %s" % len(self.times)
         s += ", tmin : %s" % np.min(self.times)
         s += ", tmax : %s" % np.max(self.times)
-        return "<DipoleFixed  |  %s>" % s
+        return "<DipoleFixed | %s>" % s
 
     def copy(self):
         """Copy the DipoleFixed object.
@@ -1306,7 +1306,7 @@ def fit_dipole(evoked, cov, bem, trans=None, min_dist=5., n_jobs=1,
     # cov = prepare_noise_cov(cov, info_nb, info_nb['ch_names'], verbose=False)
     # nzero = (cov['eig'] > 0)
     # n_chan = len(info_nb['ch_names'])
-    # whitener = np.zeros((n_chan, n_chan), dtype=np.float)
+    # whitener = np.zeros((n_chan, n_chan), dtype=np.float64)
     # whitener[nzero, nzero] = 1.0 / np.sqrt(cov['eig'][nzero])
     # whitener = np.dot(whitener, cov['eigvec'])
 

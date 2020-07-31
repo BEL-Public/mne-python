@@ -33,7 +33,7 @@ from .utils import (tight_layout, figure_nobar, _toggle_proj, _toggle_options,
                     _handle_decim, _setup_plot_projector, _set_ax_label_style,
                     _set_title_multiple_electrodes, _make_combine_callable,
                     _get_figsize_from_config, _toggle_scrollbars,
-                    _check_psd_fmax)
+                    _check_psd_fmax, _set_window_title)
 from .misc import _handle_event_colors
 
 
@@ -148,9 +148,10 @@ def plot_epochs_image(epochs, picks=None, sigma=0., vmin=None,
     evoked : bool
         Draw the ER[P/F] below the image or not.
     ts_args : None | dict
-        Arguments passed to a call to `plot_compare_evokeds` to style
+        Arguments passed to a call to `~mne.viz.plot_compare_evokeds` to style
         the evoked plot below the image. Defaults to an empty dictionary,
-        meaning `plot_compare_evokeds` will be called with default parameters.
+        meaning `~mne.viz.plot_compare_evokeds` will be called with default
+        parameters.
     title : None | str
         If :class:`str`, will be plotted as figure title. Otherwise, the
         title will indicate channel(s) or channel type being plotted. Defaults
@@ -395,7 +396,7 @@ def _validate_fig_and_axes(fig, axes, group_by, evoked, colorbar, clear=False):
         shape = (3, 10)
         for this_group in group_by:
             this_fig = figure()
-            this_fig.canvas.set_window_title(this_group)
+            _set_window_title(this_fig, this_group)
             kwargs = dict()
             if check_version('matplotlib', '2.2'):
                 kwargs['fig'] = this_fig  # unavailable on earlier mpl
@@ -425,7 +426,7 @@ def _validate_fig_and_axes(fig, axes, group_by, evoked, colorbar, clear=False):
             _ = [ax.clear() for ax in fig.axes]
             if len(fig.axes) > n_axes:  # get rid of sensor inset
                 fig.axes[-1].remove()
-            fig.canvas.set_window_title(key)
+            _set_window_title(fig, key)
         axes = {key: fig.axes}
 
     # got an Axes instance, be forgiving (if evoked and colorbar are False)
@@ -765,7 +766,7 @@ def plot_epochs(epochs, picks=None, scalings=None, n_epochs=20, n_channels=20,
         Events to show with vertical bars. If events are provided, the epoch
         numbers are not shown to prevent overlap. You can toggle epoch
         numbering through options (press 'o' key). You can use
-        :func:`mne.viz.plot_events` as a legend for the colors. By default, the
+        `~mne.viz.plot_events` as a legend for the colors. By default, the
         coloring scheme is the same.
 
         .. warning::  If the epochs have been resampled, the events no longer
@@ -776,7 +777,7 @@ def plot_epochs(epochs, picks=None, scalings=None, n_epochs=20, n_channels=20,
         Dictionary of event_id value and its associated color. If None,
         colors are automatically drawn from a default list (cycled through if
         number of events longer than list of default colors). Uses the same
-        coloring scheme as :func:`mne.viz.plot_events`.
+        coloring scheme as `~mne.viz.plot_events`.
 
         .. versionadded:: 0.14.0
     order : array of str | None
@@ -854,7 +855,7 @@ def plot_epochs(epochs, picks=None, scalings=None, n_epochs=20, n_channels=20,
     projs = epochs.info['projs']
     noise_cov = _check_cov(noise_cov, epochs.info)
 
-    params = dict(epochs=epochs, info=epochs.info.copy(), t_start=0.,
+    params = dict(epochs=epochs, info=epochs.info.copy(), t_start=0,
                   bad_color=(0.8, 0.8, 0.8), histogram=None, decim=decim,
                   data_picks=data_picks, noise_cov=noise_cov,
                   use_noise_cov=noise_cov is not None,
@@ -1027,7 +1028,7 @@ def _prepare_mne_browse_epochs(params, projs, n_channels, n_epochs, scalings,
 
     figsize = _get_figsize_from_config()
     params['fig'] = figure_nobar(facecolor='w', figsize=figsize, dpi=80)
-    params['fig'].canvas.set_window_title(title or 'Epochs')
+    _set_window_title(params['fig'], title or 'Epochs')
     _prepare_mne_browse(params, xlabel='Epochs')
     ax = params['ax']
     ax_hscroll = params['ax_hscroll']
@@ -1092,10 +1093,10 @@ def _prepare_mne_browse_epochs(params, projs, n_channels, n_epochs, scalings,
     ax.set_yticks(offsets)
     ax.set_ylim(ylim)
     ticks = epoch_times + 0.5 * n_times
-    ax.set_xticks(ticks)
-    ax2.set_xticks(ticks[:n_epochs])
+    for ax_ in (ax, ax2):
+        ax_.set_xticks(ticks[:n_epochs])
     labels = list(range(0, len(ticks)))  # epoch numbers
-    ax.set_xticklabels(labels)
+    ax.set_xticklabels(labels[:n_epochs])
     xlim = epoch_times[-1] + len(orig_epoch_times)
     ax_hscroll.set_xlim(0, xlim)
     vertline_t = ax_hscroll.text(0, 1, '', color='y', va='bottom', ha='right')
@@ -1252,13 +1253,14 @@ def _plot_traces(params):
 
     n_times = len(epochs.times)
     tick_list = list()
-    start_idx = int(params['t_start'] / n_times)
+    start_idx = params['t_start'] // n_times
     end = params['t_start'] + params['duration']
-    end_idx = int(end / n_times)
-    xlabels = params['labels'][start_idx:]
-    event_ids = params['epochs'].events[:, 2]
-    params['ax2'].set_xticklabels(event_ids[start_idx:])
+    end_idx = end // n_times
+    xlabels = params['labels'][start_idx:end_idx]
+    event_ids = params['epochs'].events[start_idx:end_idx, 2]
+    params['ax2'].set_xticklabels(event_ids)
     ax.set_xticklabels(xlabels)
+    del event_ids, xlabels
     ylabels = ax.yaxis.get_ticklabels()
     # do the plotting
     for line_idx in range(n_channels):
@@ -1339,7 +1341,7 @@ def _plot_traces(params):
             0, ylim + 1, ylim / (4 * max(len(chan_types_split), 1)))
         offset_pos = np.arange(2, (len(chan_types_split) * 4) + 1, 4)
         ax.set_yticks(ticks)
-        labels = [''] * 20
+        labels = [''] * len(ticks)
         labels = [0 if idx in range(2, len(labels), 4) else label
                   for idx, label in enumerate(labels)]
         for idx_chan, chan_type in enumerate(chan_types_split):
@@ -1356,6 +1358,7 @@ def _plot_traces(params):
                 labels[li] = round(label, 2)
         ax.set_yticklabels(labels, fontsize=12, color='black')
     else:
+        ax.set_yticks(params['offsets'][:len(tick_list)])
         ax.set_yticklabels(tick_list, fontsize=12)
         _set_ax_label_style(ax, params)
 
@@ -1382,7 +1385,7 @@ def _plot_update_epochs_proj(params, bools=None):
     n_epochs = params['n_epochs']
     params['projector'], params['whitened_ch_names'] = _setup_plot_projector(
         params['info'], params['noise_cov'], True, params['use_noise_cov'])
-    start = int(params['t_start'] / len(epochs.times))
+    start = params['t_start'] // len(epochs.times)
     end = start + n_epochs
     if epochs.preload:
         data = np.concatenate(epochs.get_data()[start:end], axis=1)
@@ -1407,7 +1410,7 @@ def _plot_update_epochs_proj(params, bools=None):
 def _handle_picks(epochs):
     """Handle picks."""
     if any('ICA' in k for k in epochs.ch_names):
-        picks = pick_types(epochs.info, misc=True, ref_meg=False,
+        picks = pick_types(epochs.info, meg=True, misc=True, ref_meg=False,
                            exclude=[])
     else:
         picks = pick_types(epochs.info, meg=True, eeg=True, eog=True, ecg=True,
@@ -1419,6 +1422,7 @@ def _handle_picks(epochs):
 def _plot_window(value, params):
     """Deal with horizontal shift of the viewport."""
     max_times = len(params['times']) - params['duration']
+    value = int(round(value))
     if value > max_times:
         value = len(params['times']) - params['duration']
     if value < 0:
@@ -1681,7 +1685,8 @@ def _plot_onkey(event, params):
             return
         n_times = len(params['epochs'].times)
         ticks = params['epoch_times'] + 0.5 * n_times
-        params['ax2'].set_xticks(ticks[:n_epochs])
+        for key in ('ax', 'ax2'):
+            params[key].set_xticks(ticks[:n_epochs])
         params['n_epochs'] = n_epochs
         params['duration'] -= n_times
         params['hsel_patch'].set_width(params['duration'])
@@ -1693,7 +1698,8 @@ def _plot_onkey(event, params):
         if n_times * n_epochs > len(params['times']):
             return
         ticks = params['epoch_times'] + 0.5 * n_times
-        params['ax2'].set_xticks(ticks[:n_epochs])
+        for key in ('ax', 'ax2'):
+            params[key].set_xticks(ticks[:n_epochs])
         params['n_epochs'] = n_epochs
         if len(params['vert_lines']) > 0:
             ax = params['ax']
@@ -1842,7 +1848,8 @@ def _update_channels_epochs(event, params):
     n_epochs = int(np.around(params['epoch_slider'].val))
     n_times = len(params['epochs'].times)
     ticks = params['epoch_times'] + 0.5 * n_times
-    params['ax2'].set_xticks(ticks[:n_epochs])
+    for key in ('ax', 'ax2'):
+        params[key].set_xticks(ticks[:n_epochs])
     params['n_epochs'] = n_epochs
     params['duration'] = n_times * n_epochs
     params['hsel_patch'].set_width(params['duration'])
@@ -1890,7 +1897,7 @@ def _open_options(params):
     width = 10
     height = 3
     fig_options = figure_nobar(figsize=(width, height), dpi=80)
-    fig_options.canvas.set_window_title('View settings')
+    _set_window_title(fig_options, 'View settings')
     params['fig_options'] = fig_options
     ax_channels = plt.axes([0.15, 0.1, 0.65, 0.1])
     ax_epochs = plt.axes([0.15, 0.25, 0.65, 0.1])
@@ -2003,7 +2010,7 @@ def _draw_event_lines(params):
     includes_tzero = False
     epochs = params['epochs']
     n_times = len(epochs.times)
-    start_idx = int(params['t_start'] / n_times)
+    start_idx = params['t_start'] // n_times
     color = params['event_colors']
     ax = params['ax']
     for ev_line in params['ev_lines']:

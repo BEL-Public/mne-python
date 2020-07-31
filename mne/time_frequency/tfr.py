@@ -368,11 +368,11 @@ def _compute_tfr(epoch_data, freqs, sfreq=1.0, method='morlet',
     n_freqs = len(freqs)
     n_epochs, n_chans, n_times = epoch_data[:, :, decim].shape
     if output in ('power', 'phase', 'avg_power', 'itc'):
-        dtype = np.float
+        dtype = np.float64
     elif output in ('complex', 'avg_power_itc'):
         # avg_power_itc is stored as power + 1i * itc to keep a
         # simple dimensionality
-        dtype = np.complex
+        dtype = np.complex128
 
     if ('avg_' in output) or ('itc' in output):
         out = np.empty((n_chans, n_freqs, n_times), dtype)
@@ -495,9 +495,9 @@ def _time_frequency_loop(X, Ws, output, use_fft, mode, decim):
         The decimation slice: e.g. power[:, decim]
     """
     # Set output type
-    dtype = np.float
+    dtype = np.float64
     if output in ['complex', 'avg_power_itc']:
-        dtype = np.complex
+        dtype = np.complex128
 
     # Init outputs
     decim = _check_decim(decim)
@@ -514,7 +514,7 @@ def _time_frequency_loop(X, Ws, output, use_fft, mode, decim):
 
         # Inter-trial phase locking is apparently computed per taper...
         if 'itc' in output:
-            plf = np.zeros((n_freqs, n_times), dtype=np.complex)
+            plf = np.zeros((n_freqs, n_times), dtype=np.complex128)
 
         # Loop across epochs
         for epoch_idx, tfr in enumerate(coefs):
@@ -565,7 +565,7 @@ def cwt(X, Ws, use_fft=True, mode='same', decim=1):
         Use FFT for convolutions. Defaults to True.
     mode : 'same' | 'valid' | 'full'
         Convention for convolution. 'full' is currently not implemented with
-        `use_fft=False`. Defaults to 'same'.
+        ``use_fft=False``. Defaults to ``'same'``.
     decim : int | slice
         To reduce memory usage, decimation factor after time-frequency
         decomposition.
@@ -591,7 +591,7 @@ def cwt(X, Ws, use_fft=True, mode='same', decim=1):
 
     coefs = _cwt(X, Ws, mode, decim=decim, use_fft=use_fft)
 
-    tfrs = np.empty((n_signals, len(Ws), n_times), dtype=np.complex)
+    tfrs = np.empty((n_signals, len(Ws), n_times), dtype=np.complex128)
     for k, tfr in enumerate(coefs):
         tfrs[k] = tfr
 
@@ -688,10 +688,7 @@ def tfr_morlet(inst, freqs, n_cycles, use_fft=False, return_itc=True, decim=1,
         Make sure the wavelet has a mean of zero.
 
         .. versionadded:: 0.13.0
-    average : bool, default True
-        If True average across Epochs.
-
-        .. versionadded:: 0.13.0
+    %(tfr_average)s
     output : str
         Can be "power" (default) or "complex". If "complex", then
         average must be False.
@@ -831,10 +828,7 @@ def tfr_multitaper(inst, freqs, n_cycles, time_bandwidth=4.0,
         .. note:: Decimation may create aliasing artifacts.
     %(n_jobs)s
     %(picks_good_data)s
-    average : bool, default True
-        If True average across Epochs.
-
-        .. versionadded:: 0.13.0
+    %(tfr_average)s
     %(verbose)s
 
     Returns
@@ -988,6 +982,10 @@ class _BaseTFR(ContainsMixin, UpdateChannelsMixin, SizeMixin):
             The file name, which should end with ``-tfr.h5``.
         overwrite : bool
             If True, overwrite file (if it exists). Defaults to False.
+
+        See Also
+        --------
+        read_tfrs, write_tfrs
         """
         write_tfrs(fname, self, overwrite=overwrite)
 
@@ -1161,18 +1159,18 @@ class AverageTFR(_BaseTFR):
 
             .. versionadded:: 0.16.0
         mask_style : None | 'both' | 'contour' | 'mask'
-            If `mask` is not None: if 'contour', a contour line is drawn around
-            the masked areas (``True`` in `mask`). If 'mask', entries not
-            ``True`` in `mask` are shown transparently. If 'both', both a contour
-            and transparency are used.
-            If ``None``, defaults to 'both' if `mask` is not None, and is ignored
-            otherwise.
+            If ``mask`` is not None: if ``'contour'``, a contour line is drawn
+            around the masked areas (``True`` in ``mask``). If ``'mask'``,
+            entries not ``True`` in ``mask`` are shown transparently. If
+            ``'both'``, both a contour and transparency are used.
+            If ``None``, defaults to ``'both'`` if ``mask`` is not None, and is
+            ignored otherwise.
 
              .. versionadded:: 0.17
         mask_cmap : matplotlib colormap | (colormap, bool) | 'interactive'
             The colormap chosen for masked parts of the image (see below), if
-            `mask` is not ``None``. If None, `cmap` is reused. Defaults to
-            ``Greys``. Not interactive. Otherwise, as `cmap`.
+            ``mask`` is not ``None``. If None, ``cmap`` is reused. Defaults to
+            ``'Greys'``. Not interactive. Otherwise, as ``cmap``.
 
              .. versionadded:: 0.17
         mask_alpha : float
@@ -1334,11 +1332,11 @@ class AverageTFR(_BaseTFR):
             available is used.
         vmin : float | None
             The minimum value of the color scale for the image (for
-            topomaps, see `topomap_args`). If vmin is None, the data
+            topomaps, see ``topomap_args``). If vmin is None, the data
             absolute minimum value is used.
         vmax : float | None
             The maximum value of the color scale for the image (for
-            topomaps, see `topomap_args`). If vmax is None, the data
+            topomaps, see ``topomap_args``). If vmax is None, the data
             absolute maximum value is used.
         cmap : matplotlib colormap
             The colormap to use.
@@ -1360,17 +1358,17 @@ class AverageTFR(_BaseTFR):
             Type of aggregation to perform across selected channels.
         exclude : list of str | 'bads'
             Channels names to exclude from being shown. If 'bads', the
-            bad channels are excluded. Defaults to an empty list, i.e., `[]`.
+            bad channels are excluded. Defaults to an empty list, i.e., ``[]``.
         topomap_args : None | dict
-            A dict of `kwargs` that are forwarded to
-            :func:`mne.viz.plot_topomap` to style the topomaps. `axes` and
-            `show` are ignored. If `times` is not in this dict, automatic
+            A dict of ``kwargs`` that are forwarded to
+            :func:`mne.viz.plot_topomap` to style the topomaps. ``axes`` and
+            ``show`` are ignored. If ``times`` is not in this dict, automatic
             peak detection is used. Beyond that, if ``None``, no customizable
             arguments will be passed.
             Defaults to ``None``.
         image_args : None | dict
-            A dict of `kwargs` that are forwarded to :meth:`AverageTFR.plot`
-            to style the image. `axes` and `show` are ignored. Beyond that,
+            A dict of ``kwargs`` that are forwarded to :meth:`AverageTFR.plot`
+            to style the image. ``axes`` and ``show`` are ignored. Beyond that,
             if ``None``, no customizable arguments will be passed.
             Defaults to ``None``.
         %(verbose_meth)s
@@ -1382,18 +1380,18 @@ class AverageTFR(_BaseTFR):
 
         Notes
         -----
-        `timefreqs` has three different modes: tuples, dicts, and auto.
+        ``timefreqs`` has three different modes: tuples, dicts, and auto.
         For (list of) tuple(s) mode, each tuple defines a pair
         (time, frequency) in s and Hz on the TFR plot. For example, to
         look at 10 Hz activity 1 second into the epoch and 3 Hz activity
-        300 msec into the epoch,::
+        300 msec into the epoch, ::
 
             timefreqs=((1, 10), (.3, 3))
 
         If provided as a dictionary, (time, frequency) tuples are keys and
         (time_window, frequency_window) tuples are the values - indicating the
         width of the windows (centered on the time and frequency indicated by
-        the key) to be averaged over. For example,::
+        the key) to be averaged over. For example, ::
 
             timefreqs={(1, 10): (0.1, 2)}
 
@@ -1867,7 +1865,7 @@ class AverageTFR(_BaseTFR):
             If True, show channel names on top of the map. If a callable is
             passed, channel names will be formatted using the callable; e.g.,
             to delete the prefix 'MEG ' from all channel names, pass the
-            function lambda x: x.replace('MEG ', ''). If `mask` is not None,
+            function lambda x: x.replace('MEG ', ''). If ``mask`` is not None,
             only significant sensors will be shown.
         title : str | None
             Title. If None (default), no title is displayed.
@@ -1930,13 +1928,33 @@ class AverageTFR(_BaseTFR):
         self.data -= tfr.data
         return self
 
+    def __truediv__(self, a):  # noqa: D105
+        """Divide instances."""
+        out = self.copy()
+        out /= a
+        return out
+
+    def __itruediv__(self, a):  # noqa: D105
+        self.data /= a
+        return self
+
+    def __mul__(self, a):
+        """Multiply source instances."""
+        out = self.copy()
+        out *= a
+        return out
+
+    def __imul__(self, a):  # noqa: D105
+        self.data *= a
+        return self
+
     def __repr__(self):  # noqa: D105
         s = "time : [%f, %f]" % (self.times[0], self.times[-1])
         s += ", freq : [%f, %f]" % (self.freqs[0], self.freqs[-1])
         s += ", nave : %d" % self.nave
         s += ', channels : %d' % self.data.shape[0]
         s += ', ~%s' % (sizeof_fmt(self._size),)
-        return "<AverageTFR  |  %s>" % s
+        return "<AverageTFR | %s>" % s
 
 
 @fill_doc
@@ -2036,7 +2054,7 @@ class EpochsTFR(_BaseTFR, GetEpochsMixin):
         s += ", epochs : %d" % self.data.shape[0]
         s += ', channels : %d' % self.data.shape[1]
         s += ', ~%s' % (sizeof_fmt(self._size),)
-        return "<EpochsTFR  |  %s>" % s
+        return "<EpochsTFR | %s>" % s
 
     def __abs__(self):
         """Take the absolute value."""
@@ -2269,7 +2287,7 @@ def read_tfrs(fname, condition=None):
     Returns
     -------
     tfrs : list of instances of AverageTFR | instance of AverageTFR
-        Depending on `condition` either the TFR object or a list of multiple
+        Depending on ``condition`` either the TFR object or a list of multiple
         TFR objects.
 
     See Also
@@ -2286,6 +2304,7 @@ def read_tfrs(fname, condition=None):
     tfr_data = read_hdf5(fname, title='mnepython', slash='replace')
     for k, tfr in tfr_data:
         tfr['info'] = Info(tfr['info'])
+        tfr['info']._check_consistency()
         if 'metadata' in tfr:
             tfr['metadata'] = _prepare_read_metadata(tfr['metadata'])
     is_average = 'nave' in tfr

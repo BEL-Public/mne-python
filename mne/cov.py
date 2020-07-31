@@ -208,7 +208,7 @@ class Covariance(dict):
             s = 'diagonal : %s' % self.data.size
         s += ", n_samples : %s" % self.nfree
         s += ", data : %s" % self.data
-        return "<Covariance  |  %s>" % s
+        return "<Covariance | %s>" % s
 
     def __add__(self, cov):
         """Add Covariance taking into account number of degrees of freedom."""
@@ -312,8 +312,8 @@ def make_ad_hoc_cov(info, std=None, verbose=None):
         Measurement info.
     std : dict of float | None
         Standard_deviation of the diagonal elements. If dict, keys should be
-        `grad` for gradiometers, `mag` for magnetometers and `eeg` for EEG
-        channels. If None, default values will be used (see Notes).
+        ``'grad'`` for gradiometers, ``'mag'`` for magnetometers and ``'eeg'``
+        for EEG channels. If None, default values will be used (see Notes).
     %(verbose)s
 
     Returns
@@ -846,8 +846,8 @@ def compute_covariance(epochs, keep_sample_mean=True, tmin=None, tmax=None,
         # prepare mean covs
         n_epoch_types = len(epochs)
         data_mean = [0] * n_epoch_types
-        n_samples = np.zeros(n_epoch_types, dtype=np.int)
-        n_epochs = np.zeros(n_epoch_types, dtype=np.int)
+        n_samples = np.zeros(n_epoch_types, dtype=np.int64)
+        n_epochs = np.zeros(n_epoch_types, dtype=np.int64)
 
         for ii, epochs_t in enumerate(epochs):
 
@@ -936,9 +936,9 @@ def _check_scalings_user(scalings):
 def _eigvec_subspace(eig, eigvec, mask):
     """Compute the subspace from a subset of eigenvectors."""
     # We do the same thing we do with projectors:
-    P = np.eye(len(eigvec)) - np.dot(eigvec[~mask].T, eigvec[~mask])
+    P = np.eye(len(eigvec)) - np.dot(eigvec[~mask].conj().T, eigvec[~mask])
     eig, eigvec = eigh(P)
-    eigvec = eigvec.T
+    eigvec = eigvec.conj().T
     return eig, eigvec
 
 
@@ -1183,7 +1183,7 @@ class _RegCovariance(BaseEstimator):
     """Aux class."""
 
     def __init__(self, info, grad=0.1, mag=0.1, eeg=0.1, seeg=0.1, ecog=0.1,
-                 hbo=0.1, hbr=0.1, fnirs_raw=0.1, fnirs_od=0.1,
+                 hbo=0.1, hbr=0.1, fnirs_cw_amplitude=0.1, fnirs_od=0.1,
                  csd=0.1, store_precision=False, assume_centered=False):
         self.info = info
         # For sklearn compat, these cannot (easily?) be combined into
@@ -1195,7 +1195,7 @@ class _RegCovariance(BaseEstimator):
         self.ecog = ecog
         self.hbo = hbo
         self.hbr = hbr
-        self.fnirs_raw = fnirs_raw
+        self.fnirs_cw_amplitude = fnirs_cw_amplitude
         self.fnirs_od = fnirs_od
         self.csd = csd
         self.store_precision = store_precision
@@ -1337,7 +1337,7 @@ def _get_ch_whitener(A, pca, ch_type, rank):
     """Get whitener params for a set of channels."""
     # whitening operator
     eig, eigvec = eigh(A, overwrite_a=True)
-    eigvec = eigvec.T
+    eigvec = eigvec.conj().T
     mask = np.ones(len(eig), bool)
     eig[:-rank] = 0.0
     mask[:-rank] = False
@@ -1441,8 +1441,10 @@ def _smart_eigh(C, info, rank, scalings=None, projs=None,
     # time saving short-circuit
     if proj_subspace and sum(rank.values()) == C.shape[0]:
         return np.ones(n_chan), np.eye(n_chan), np.ones(n_chan, bool)
-    eig = np.zeros(n_chan)
-    eigvec = np.zeros((n_chan, n_chan))
+
+    dtype = complex if C.dtype == np.complex_ else float
+    eig = np.zeros(n_chan, dtype)
+    eigvec = np.zeros((n_chan, n_chan), dtype)
     mask = np.zeros(n_chan, bool)
     for ch_type, picks in _picks_by_type(info, meg_combined=True,
                                          ref_meg=False, exclude='bads'):
@@ -1473,7 +1475,7 @@ def _smart_eigh(C, info, rank, scalings=None, projs=None,
 @verbose
 def regularize(cov, info, mag=0.1, grad=0.1, eeg=0.1, exclude='bads',
                proj=True, seeg=0.1, ecog=0.1, hbo=0.1, hbr=0.1,
-               fnirs_raw=0.1, fnirs_od=0.1, csd=0.1,
+               fnirs_cw_amplitude=0.1, fnirs_od=0.1, csd=0.1,
                rank=None, scalings=None, verbose=None):
     """Regularize noise covariance matrix.
 
@@ -1498,7 +1500,7 @@ def regularize(cov, info, mag=0.1, grad=0.1, eeg=0.1, exclude='bads',
         Regularization factor for MEG magnetometers.
     grad : float (default 0.1)
         Regularization factor for MEG gradiometers. Must be the same as
-        `mag` if data have been processed with SSS.
+        ``mag`` if data have been processed with SSS.
     eeg : float (default 0.1)
         Regularization factor for EEG.
     exclude : list | 'bads' (default 'bads')
@@ -1514,7 +1516,7 @@ def regularize(cov, info, mag=0.1, grad=0.1, eeg=0.1, exclude='bads',
         Regularization factor for HBO signals.
     hbr : float (default 0.1)
         Regularization factor for HBR signals.
-    fnirs_raw : float (default 0.1)
+    fnirs_cw_amplitude : float (default 0.1)
         Regularization factor for fNIRS raw signals.
     fnirs_od : float (default 0.1)
         Regularization factor for fNIRS optical density signals.
@@ -1546,7 +1548,8 @@ def regularize(cov, info, mag=0.1, grad=0.1, eeg=0.1, exclude='bads',
     info._check_consistency()
     scalings = _handle_default('scalings_cov_rank', scalings)
     regs = dict(eeg=eeg, seeg=seeg, ecog=ecog, hbo=hbo, hbr=hbr,
-                fnirs_raw=fnirs_raw, fnirs_od=fnirs_od, csd=csd)
+                fnirs_cw_amplitude=fnirs_cw_amplitude,
+                fnirs_od=fnirs_od, csd=csd)
 
     if exclude is None:
         raise ValueError('exclude must be a list of strings or "bads"')
@@ -1689,7 +1692,7 @@ def compute_whitener(noise_cov, info=None, picks=None, rank=None,
     noise_cov : Covariance
         The noise covariance.
     info : dict | None
-        The measurement info. Can be None if `noise_cov` has already been
+        The measurement info. Can be None if ``noise_cov`` has already been
         prepared with :func:`prepare_noise_cov`.
     %(picks_good_data_noref)s
     %(rank_None)s
@@ -1757,11 +1760,15 @@ def compute_whitener(noise_cov, info=None, picks=None, rank=None,
     nzero = (eig > 0)
     eig[~nzero] = 0.  # get rid of numerical noise (negative) ones
 
-    W = np.zeros((n_chan, 1), dtype=np.float)
+    if noise_cov['eigvec'].dtype.kind == 'c':
+        dtype = np.complex128
+    else:
+        dtype = np.float64
+    W = np.zeros((n_chan, 1), dtype)
     W[nzero, 0] = 1.0 / np.sqrt(eig[nzero])
     #   Rows of eigvec are the eigenvectors
     W = W * noise_cov['eigvec']  # C ** -0.5
-    C = np.sqrt(eig) * noise_cov['eigvec'].T  # C ** 0.5
+    C = np.sqrt(eig) * noise_cov['eigvec'].conj().T  # C ** 0.5
     n_nzero = nzero.sum()
     logger.info('    Created the whitener using a noise covariance matrix '
                 'with rank %d (%d small eigenvalues omitted)'
@@ -1772,7 +1779,7 @@ def compute_whitener(noise_cov, info=None, picks=None, rank=None,
         W = W[nzero]
         C = C[:, nzero]
     elif pca is False:
-        W = np.dot(noise_cov['eigvec'].T, W)
+        W = np.dot(noise_cov['eigvec'].conj().T, W)
         C = np.dot(C, noise_cov['eigvec'])
 
     # Triage return
@@ -1963,7 +1970,7 @@ def _write_cov(fid, cov):
     else:
         # Store only lower part of covariance matrix
         dim = cov['dim']
-        mask = np.tril(np.ones((dim, dim), dtype=np.bool)) > 0
+        mask = np.tril(np.ones((dim, dim), dtype=bool)) > 0
         vals = cov['data'][mask].ravel()
         write_double(fid, FIFF.FIFF_MNE_COV, vals)
 

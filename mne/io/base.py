@@ -431,6 +431,7 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin, SetChannelsMixin,
         raise NotImplementedError
 
     def _check_bad_segment(self, start, stop, picks,
+                           reject_start, reject_stop,
                            reject_by_annotation=False):
         """Check if data segment is bad.
 
@@ -446,6 +447,10 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin, SetChannelsMixin,
             End of the slice.
         picks : array of int
             Channel picks.
+        reject_start : int
+            First sample to check for overlaps with bad annotations.
+        reject_stop : int
+            Last sample to check for overlaps with bad annotations.
         reject_by_annotation : bool
             Whether to perform rejection based on annotations.
             False by default.
@@ -462,9 +467,9 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin, SetChannelsMixin,
             annot = self.annotations
             sfreq = self.info['sfreq']
             onset = _sync_onset(self, annot.onset)
-            overlaps = np.where(onset < stop / sfreq)
+            overlaps = np.where(onset < reject_stop / sfreq)
             overlaps = np.where(onset[overlaps] + annot.duration[overlaps] >
-                                start / sfreq)
+                                reject_start / sfreq)
             for descr in annot.description[overlaps]:
                 if descr.lower().startswith('bad'):
                     return descr
@@ -886,7 +891,7 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin, SetChannelsMixin,
             Data type to use for raw data after applying the function. If None
             the data type is not modified.
         n_jobs : int (default: 1)
-            Number of jobs to run in parallel. Ignored if `channel_wise` is
+            Number of jobs to run in parallel. Ignored if ``channel_wise`` is
             False.
         channel_wise : bool (default: True)
             Whether to apply the function to each channel individually. If
@@ -1153,7 +1158,7 @@ class BaseRaw(ProjMixin, ContainsMixin, UpdateChannelsMixin, SetChannelsMixin,
                     new_data[ci, this_sl] = resamp
 
         self._first_samps = (self._first_samps * ratio).astype(int)
-        self._last_samps = (np.array(self._first_samps) + n_news - 1).tolist()
+        self._last_samps = (np.array(self._first_samps) + n_news - 1)
         self._raw_lengths[ri] = list(n_news)
         assert np.array_equal(n_news, self._last_samps - self._first_samps + 1)
         self._data = new_data
@@ -2128,7 +2133,7 @@ def concatenate_raws(raws, preload=None, events_list=None, verbose=None):
     raw : instance of Raw
         The result of the concatenation (first Raw instance passed in).
     events : ndarray of int, shape (n_events, 3)
-        The events. Only returned if `event_list` is not None.
+        The events. Only returned if ``event_list`` is not None.
     """
     if events_list is not None:
         if len(events_list) != len(raws):
