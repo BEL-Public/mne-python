@@ -22,7 +22,7 @@ import mne
 from mne import (Epochs, Annotations, read_events, pick_events, read_epochs,
                  equalize_channels, pick_types, pick_channels, read_evokeds,
                  write_evokeds, create_info, make_fixed_length_events,
-                 combine_evoked)
+                 make_fixed_length_epochs, combine_evoked)
 from mne.baseline import rescale
 from mne.fixes import rfft, rfftfreq
 from mne.preprocessing import maxwell_filter
@@ -745,6 +745,14 @@ def test_epochs_baseline(preload):
     expected[0] = [-0.5, 0.5]
     assert_allclose(epochs.get_data()[0], expected)
 
+    # We shouldn't be able to remove a baseline correction after it has been
+    # applied.
+    baseline = (None, None)
+    epochs = mne.Epochs(raw, events, None, 0, 1e-3, baseline=baseline,
+                        preload=preload)
+    with pytest.raises(ValueError, match='already been baseline-corrected'):
+        epochs.apply_baseline(None)
+
 
 def test_epochs_bad_baseline():
     """Test Epochs initialization with bad baseline parameters."""
@@ -981,7 +989,7 @@ def test_epochs_io_preload(tmpdir, preload):
     assert epochs.times[-1] > 0
     epochs.apply_baseline((None, 0))
     with pytest.warns(RuntimeWarning,
-                      match=r'setting epochs\.baseline = None'):
+                      match='Cropping removes baseline period'):
         epochs.crop(1. / epochs.info['sfreq'], None)
     assert epochs.baseline is None
     epochs.save(fname_temp, overwrite=True)
@@ -1065,7 +1073,8 @@ def test_epochs_io_preload(tmpdir, preload):
 
     # Test that having a single time point works
     assert epochs.baseline is not None
-    with pytest.warns(RuntimeWarning, match=r'setting epochs\.baseline'):
+    with pytest.warns(RuntimeWarning,
+                      match='Cropping removes baseline period'):
         epochs.load_data().crop(0, 0)
     assert epochs.baseline is None
     assert_equal(len(epochs.times), 1)
@@ -1209,9 +1218,11 @@ def test_evoked_io_from_epochs(tmpdir):
     raw, events, picks = _get_data()
     raw.info['lowpass'] = 40  # avoid aliasing warnings
     # offset our tmin so we don't get exactly a zero value when decimating
+    baseline = None
     epochs = Epochs(raw, events[:4], event_id, tmin + 0.011, tmax,
-                    picks=picks, decim=5)
+                    picks=picks, decim=5, baseline=baseline)
     evoked = epochs.average()
+    assert evoked.baseline == baseline
     evoked.info['proj_name'] = ''  # Test that empty string shortcuts to None.
     fname_temp = op.join(tempdir, 'evoked-ave.fif')
     evoked.save(fname_temp)
@@ -1220,21 +1231,27 @@ def test_evoked_io_from_epochs(tmpdir):
     assert_allclose(evoked.data, evoked2.data, rtol=1e-4, atol=1e-20)
     assert_allclose(evoked.times, evoked2.times, rtol=1e-4,
                     atol=1 / evoked.info['sfreq'])
+    assert evoked2.baseline == baseline
 
     # now let's do one with negative time
+    baseline = (0.1, 0.2)
     epochs = Epochs(raw, events[:4], event_id, 0.1, tmax,
-                    picks=picks, baseline=(0.1, 0.2), decim=5)
+                    picks=picks, decim=5, baseline=baseline)
     evoked = epochs.average()
+    assert evoked.baseline == baseline
     evoked.save(fname_temp)
     evoked2 = read_evokeds(fname_temp)[0]
     assert_allclose(evoked.data, evoked2.data, rtol=1e-4, atol=1e-20)
     assert_allclose(evoked.times, evoked2.times, rtol=1e-4, atol=1e-20)
+    assert_allclose(evoked2.baseline, baseline)
 
     # should be equivalent to a cropped original
+    baseline = (0.1, 0.2)
     epochs = Epochs(raw, events[:4], event_id, -0.2, tmax,
-                    picks=picks, baseline=(0.1, 0.2), decim=5)
+                    picks=picks, decim=5, baseline=baseline)
     evoked = epochs.average()
     evoked.crop(0.099, None)
+    assert evoked.baseline == baseline
     assert_allclose(evoked.data, evoked2.data, rtol=1e-4, atol=1e-20)
     assert_allclose(evoked.times, evoked2.times, rtol=1e-4, atol=1e-20)
 
@@ -1792,10 +1809,10 @@ def test_access_by_name(tmpdir):
     pytest.raises(ValueError, Epochs, raw, events, event_id_illegal,
                   tmin, tmax)
     # Test on_missing
-    pytest.raises(ValueError, Epochs, raw, events, 1, tmin, tmax,
-                  on_missing='foo')
+    pytest.raises(ValueError, Epochs, raw, events, event_id_illegal, tmin,
+                  tmax, on_missing='foo')
     with pytest.warns(RuntimeWarning, match='No matching events'):
-        Epochs(raw, events, event_id_illegal, tmin, tmax, on_missing='warning')
+        Epochs(raw, events, event_id_illegal, tmin, tmax, on_missing='warn')
     Epochs(raw, events, event_id_illegal, tmin, tmax, on_missing='ignore')
 
     # Test constructing epochs with a list of ints as events
@@ -2420,7 +2437,7 @@ def test_concatenate_epochs():
     assert_equal(epochs_conc.drop_log, epochs.drop_log * 2)
 
     epochs2 = epochs.copy().load_data()
-    with pytest.raises(ValueError, match='nchan.*must match'):
+    with pytest.raises(ValueError, match=r"epochs\[1\].info\['nchan'\] must"):
         concatenate_epochs(
             [epochs, epochs2.copy().drop_channels(epochs2.ch_names[:1])])
 
@@ -3001,6 +3018,37 @@ def test_epochs_get_data_item(preload):
     one_data = epochs.get_data(item=0)
     one_epo = epochs[0]
     assert_array_equal(one_data, one_epo.get_data())
+
+
+def test_pick_types_reject_flat_keys():
+    """Test that epochs.pick_types removes keys from reject/flat."""
+    raw, events, _ = _get_data()
+    event_id = {'a/1': 1, 'a/2': 2, 'b/1': 3, 'b/2': 4}
+    picks = pick_types(raw.info, meg=True, eeg=True, ecg=True, eog=True)
+    epochs = Epochs(raw, events, event_id, preload=True, picks=picks,
+                    reject=dict(grad=1e-10, mag=1e-10, eeg=1e-3, eog=1e-3),
+                    flat=dict(grad=1e-16, mag=1e-16, eeg=1e-16, eog=1e-16))
+
+    assert sorted(epochs.reject.keys()) == ['eeg', 'eog', 'grad', 'mag']
+    assert sorted(epochs.flat.keys()) == ['eeg', 'eog', 'grad', 'mag']
+    epochs.pick_types(meg=True, eeg=False, ecg=False, eog=False)
+    assert sorted(epochs.reject.keys()) == ['grad', 'mag']
+    assert sorted(epochs.flat.keys()) == ['grad', 'mag']
+
+
+@testing.requires_testing_data
+def test_make_fixed_length_epochs():
+    """Test dividing raw data into equal-sized consecutive epochs."""
+    raw = read_raw_fif(raw_fname, preload=True)
+    epochs = make_fixed_length_epochs(raw, duration=1, preload=True)
+    # Test Raw with annotations
+    annot = Annotations(onset=[0], duration=[5], description=['BAD'])
+    raw_annot = raw.set_annotations(annot)
+    epochs_annot = make_fixed_length_epochs(raw_annot, duration=1.0,
+                                            preload=True)
+    assert len(epochs) > 10
+    assert len(epochs_annot) > 10
+    assert len(epochs) > len(epochs_annot)
 
 
 run_tests_if_main()

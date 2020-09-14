@@ -1,4 +1,4 @@
-"""Util function to baseline correct data."""
+"""Utility functions to baseline-correct data."""
 
 # Authors: Alexandre Gramfort <alexandre.gramfort@inria.fr>
 #
@@ -9,12 +9,51 @@ import numpy as np
 from .utils import logger, verbose, _check_option
 
 
+def _check_baseline(baseline, tmin, tmax, sfreq):
+    """Check for a valid baseline."""
+    if baseline is not None:
+        if not isinstance(baseline, tuple) or len(baseline) != 2:
+            raise ValueError('`baseline=%s` is an invalid argument, must be '
+                             'a tuple of length 2 or None' % str(baseline))
+        # check default value of baseline and `tmin=0`
+        if baseline == (None, 0) and tmin == 0:
+            raise ValueError('Baseline interval is only one sample. Use '
+                             '`baseline=(0, 0)` if this is desired.')
+
+        baseline_tmin, baseline_tmax = baseline
+        tstep = 1. / float(sfreq)
+        if baseline_tmin is None:
+            baseline_tmin = tmin
+        baseline_tmin = float(baseline_tmin)
+        if baseline_tmax is None:
+            baseline_tmax = tmax
+        baseline_tmax = float(baseline_tmax)
+        if baseline_tmin < tmin - tstep:
+            raise ValueError(
+                "Baseline interval (tmin = %s) is outside of "
+                "data range (tmin = %s)" % (baseline_tmin, tmin))
+        if baseline_tmax > tmax + tstep:
+            raise ValueError(
+                "Baseline interval (tmax = %s) is outside of "
+                "data range (tmax = %s)" % (baseline_tmax, tmax))
+        if baseline_tmin > baseline_tmax:
+            raise ValueError(
+                "Baseline min (%s) must be less than baseline max (%s)"
+                % (baseline_tmin, baseline_tmax))
+
+
 def _log_rescale(baseline, mode='mean'):
     """Log the rescaling method."""
     if baseline is not None:
         _check_option('mode', mode, ['logratio', 'ratio', 'zscore', 'mean',
                                      'percent', 'zlogratio'])
-        msg = 'Applying baseline correction (mode: %s)' % mode
+        bmin, bmax = baseline
+        bmin = None if bmin is None else f'{round(bmin, 3):.3f}'
+        bmax = None if bmax is None else f'{round(bmax, 3):.3f}'
+        unit = '' if bmin is None and bmax is None else ' sec'
+
+        msg = (f'Applying baseline correction '
+               f'(baseline: [{bmin}, {bmax}]{unit}, mode: {mode})')
     else:
         msg = 'No baseline correction applied'
     return msg
@@ -32,14 +71,7 @@ def rescale(data, times, baseline, mode='mean', copy=True, picks=None,
         dimension should be time.
     times : 1D array
         Time instants is seconds.
-    baseline : tuple or list of length 2, or None
-        The time interval to apply rescaling / baseline correction.
-        If None do not apply it. If baseline is ``(bmin, bmax)``
-        the interval is between ``bmin`` (s) and ``bmax`` (s).
-        If ``bmin is None`` the beginning of the data is used
-        and if ``bmax is None`` then ``bmax`` is set to the end of the
-        interval. If baseline is ``(None, None)`` the entire time
-        interval is used. If baseline is None, no correction is applied.
+    %(baseline_array)s
     mode : 'mean' | 'ratio' | 'logratio' | 'percent' | 'zscore' | 'zlogratio'
         Perform baseline correction by
 

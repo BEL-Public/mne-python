@@ -15,7 +15,7 @@ import mne
 from mne.datasets import testing
 from mne.label import read_label, label_sign_flip
 from mne.event import read_events
-from mne.epochs import Epochs
+from mne.epochs import Epochs, EpochsArray
 from mne.forward import restrict_forward_to_stc, apply_forward, is_fixed_orient
 from mne.source_estimate import read_source_estimate, VolSourceEstimate
 from mne.source_space import _get_src_nn
@@ -53,6 +53,7 @@ fname_inv_meeg_diag = op.join(s_path,
 fname_data = op.join(s_path, 'sample_audvis_trunc-ave.fif')
 fname_cov = op.join(s_path, 'sample_audvis_trunc-cov.fif')
 fname_raw = op.join(s_path, 'sample_audvis_trunc_raw.fif')
+fname_sss = op.join(test_path, 'SSS', 'test_move_anon_raw_sss.fif')
 fname_raw_ctf = op.join(test_path, 'CTF', 'somMDYO-18av.ds')
 fname_event = op.join(s_path, 'sample_audvis_trunc_raw-eve.fif')
 fname_label = op.join(s_path, 'labels', '%s.label')
@@ -509,12 +510,21 @@ def test_apply_inverse_operator(evoked, inv, min_, max_):
         fixed='auto', depth=None)
     apply_inverse(evoked, inv_op_meg, 1 / 9., method='MNE', pick_ori='normal')
 
+    # Test type checking
+    with pytest.raises(TypeError, match='must be an instance of Evoked'):
+        apply_inverse(
+            mne.EpochsArray(evoked.data[np.newaxis], evoked.info), inv_op)
+    with pytest.raises(TypeError, match='must be an instance of Evoked'):
+        apply_inverse(mne.io.RawArray(evoked.data, evoked.info), inv_op)
+
     # Test we get errors when using custom ref or no average proj is present
     evoked.info['custom_ref_applied'] = True
-    pytest.raises(ValueError, apply_inverse, evoked, inv_op, lambda2, "MNE")
+    with pytest.raises(ValueError, match='Custom EEG reference'):
+        apply_inverse(evoked, inv_op, lambda2, "MNE")
     evoked.info['custom_ref_applied'] = False
     evoked.info['projs'] = []  # remove EEG proj
-    pytest.raises(ValueError, apply_inverse, evoked, inv_op, lambda2, "MNE")
+    with pytest.raises(ValueError, match='EEG average reference is mandatory'):
+        apply_inverse(evoked, inv_op, lambda2, "MNE")
 
     # But test that we do not get EEG-related errors on MEG-only inv (gh-4650)
     apply_inverse(evoked, inv_op_meg, 1. / 9.)
@@ -712,9 +722,13 @@ def test_make_inverse_operator_vector(evoked, noise_cov):
     # evokeds and then performing the inverse should yield the same result as
     # computing the difference between the inverses.
     evoked0 = read_evokeds(fname_data, condition=0, baseline=(None, 0))
-    evoked0.crop(0, 0.2)
+    with pytest.warns(RuntimeWarning, match='Cropping removes baseline'):
+        evoked0.crop(0, 0.2)
+
     evoked1 = read_evokeds(fname_data, condition=1, baseline=(None, 0))
-    evoked1.crop(0, 0.2)
+    with pytest.warns(RuntimeWarning, match='Cropping removes baseline'):
+        evoked1.crop(0, 0.2)
+
     diff = combine_evoked((evoked0, evoked1), [1, -1])
     stc_diff = apply_inverse(diff, inv_1, method='MNE')
     stc_diff_vec = apply_inverse(diff, inv_1, method='MNE', pick_ori='vector')
@@ -871,7 +885,7 @@ def test_apply_mne_inverse_raw():
     stop = 10
     raw = read_raw_fif(fname_raw)
     label_lh = read_label(fname_label % 'Aud-lh')
-    _, times = raw[0, start:stop]
+    data, times = raw[0, start:stop]
     inverse_operator = read_inverse_operator(fname_full)
     with pytest.raises(ValueError, match='has not been prepared'):
         apply_inverse_raw(raw, inverse_operator, lambda2, prepared=True)
@@ -897,6 +911,11 @@ def test_apply_mne_inverse_raw():
         assert_array_almost_equal(stc.times, times)
         assert_array_almost_equal(stc2.times, times)
         assert_array_almost_equal(stc.data, stc2.data)
+
+    with pytest.raises(TypeError, match='must be an instance of BaseRaw'):
+        apply_inverse_raw(
+            EpochsArray(raw.get_data()[np.newaxis], raw.info),
+            inverse_operator, 1.)
 
 
 @testing.requires_testing_data
@@ -1010,6 +1029,11 @@ def test_apply_mne_inverse_epochs():
     label_stc = stcs[0].in_label(label_rh)
     assert (label_stc.subject == 'sample')
     assert_array_almost_equal(stcs_rh[0].data, label_stc.data)
+
+    with pytest.raises(TypeError, match='must be an instance of BaseEpochs'):
+        apply_inverse_epochs(
+            EvokedArray(epochs[0].get_data()[0], epochs.info),
+            inverse_operator, 1.)
 
 
 def test_make_inverse_operator_bads(evoked, noise_cov):
@@ -1188,6 +1212,25 @@ def test_inverse_mixed_loose(mixed_fwd_cov_evoked):
                           for ii, v in enumerate(stc.vertices)])
     assert pos.shape == (2, 3)
     assert_allclose(got_pos, want_pos, atol=1.1e-2)
+
+
+@testing.requires_testing_data
+def test_sss_rank():
+    """Test passing rank explicitly during inverse computation."""
+    # make raw match the fwd and cov, doesn't matter that they are mismatched
+    raw = mne.io.read_raw_fif(fname_sss).pick_types(meg=True)
+    raw.rename_channels(
+        {ch_name: f'{ch_name[:3]} {ch_name[3:]}' for ch_name in raw.ch_names})
+    fwd = mne.read_forward_solution(fname_fwd)
+    cov = mne.read_cov(fname_cov)
+    with pytest.warns(RuntimeWarning, match='rank as it exceeds.*302 > 67'):
+        inv = make_inverse_operator(raw.info, fwd, cov)
+    rank = (inv['noise_cov']['eig'] > 0).sum()
+    assert rank == 302
+    # should not warn
+    inv = make_inverse_operator(raw.info, fwd, cov, rank=dict(meg=67))
+    rank = (inv['noise_cov']['eig'] > 0).sum()
+    assert rank == 67
 
 
 run_tests_if_main()

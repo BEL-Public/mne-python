@@ -610,6 +610,30 @@ class _BaseSourceEstimate(TimeMixin):
                         src_type=self._src_type),
                    title='mnepython', overwrite=True)
 
+    @copy_function_doc_to_method_doc(plot_source_estimates)
+    def plot(self, subject=None, surface='inflated', hemi='lh',
+             colormap='auto', time_label='auto', smoothing_steps=10,
+             transparent=True, alpha=1.0, time_viewer='auto',
+             subjects_dir=None,
+             figure=None, views='auto', colorbar=True, clim='auto',
+             cortex="classic", size=800, background="black",
+             foreground=None, initial_time=None, time_unit='s',
+             backend='auto', spacing='oct6', title=None, show_traces='auto',
+             src=None, volume_options=1., view_layout='vertical',
+             add_data_kwargs=None, verbose=None):
+        brain = plot_source_estimates(
+            self, subject, surface=surface, hemi=hemi, colormap=colormap,
+            time_label=time_label, smoothing_steps=smoothing_steps,
+            transparent=transparent, alpha=alpha, time_viewer=time_viewer,
+            subjects_dir=subjects_dir, figure=figure, views=views,
+            colorbar=colorbar, clim=clim, cortex=cortex, size=size,
+            background=background, foreground=foreground,
+            initial_time=initial_time, time_unit=time_unit, backend=backend,
+            spacing=spacing, title=title, show_traces=show_traces,
+            src=src, volume_options=volume_options, view_layout=view_layout,
+            add_data_kwargs=add_data_kwargs, verbose=verbose)
+        return brain
+
     @property
     def sfreq(self):
         """Sample rate of the data."""
@@ -1575,28 +1599,6 @@ class SourceEstimate(_BaseSurfaceSourceEstimate):
             super().save(fname)
         logger.info('[done]')
 
-    @copy_function_doc_to_method_doc(plot_source_estimates)
-    def plot(self, subject=None, surface='inflated', hemi='lh',
-             colormap='auto', time_label='auto', smoothing_steps=10,
-             transparent=True, alpha=1.0, time_viewer='auto',
-             subjects_dir=None,
-             figure=None, views='lat', colorbar=True, clim='auto',
-             cortex="classic", size=800, background="black",
-             foreground=None, initial_time=None, time_unit='s',
-             backend='auto', spacing='oct6', title=None,
-             show_traces='auto', verbose=None):
-        brain = plot_source_estimates(
-            self, subject, surface=surface, hemi=hemi, colormap=colormap,
-            time_label=time_label, smoothing_steps=smoothing_steps,
-            transparent=transparent, alpha=alpha, time_viewer=time_viewer,
-            subjects_dir=subjects_dir, figure=figure, views=views,
-            colorbar=colorbar, clim=clim, cortex=cortex, size=size,
-            background=background, foreground=foreground,
-            initial_time=initial_time, time_unit=time_unit, backend=backend,
-            spacing=spacing, title=title, show_traces=show_traces,
-            verbose=verbose)
-        return brain
-
     @verbose
     def estimate_snr(self, info, fwd, cov, verbose=None):
         r"""Compute time-varying SNR in the source space.
@@ -1898,11 +1900,60 @@ class _BaseVectorSourceEstimate(_BaseSourceEstimate):
             self.verbose)
         return stc, directions
 
+    @copy_function_doc_to_method_doc(plot_vector_source_estimates)
+    def plot(self, subject=None, hemi='lh', colormap='hot', time_label='auto',
+             smoothing_steps=10, transparent=True, brain_alpha=0.4,
+             overlay_alpha=None, vector_alpha=1.0, scale_factor=None,
+             time_viewer='auto', subjects_dir=None, figure=None,
+             views='lateral',
+             colorbar=True, clim='auto', cortex='classic', size=800,
+             background='black', foreground=None, initial_time=None,
+             time_unit='s', show_traces='auto', src=None, volume_options=1.,
+             view_layout='vertical', add_data_kwargs=None,
+             verbose=None):  # noqa: D102
+        return plot_vector_source_estimates(
+            self, subject=subject, hemi=hemi, colormap=colormap,
+            time_label=time_label, smoothing_steps=smoothing_steps,
+            transparent=transparent, brain_alpha=brain_alpha,
+            overlay_alpha=overlay_alpha, vector_alpha=vector_alpha,
+            scale_factor=scale_factor, time_viewer=time_viewer,
+            subjects_dir=subjects_dir, figure=figure, views=views,
+            colorbar=colorbar, clim=clim, cortex=cortex, size=size,
+            background=background, foreground=foreground,
+            initial_time=initial_time, time_unit=time_unit,
+            show_traces=show_traces, src=src, volume_options=volume_options,
+            view_layout=view_layout, add_data_kwargs=add_data_kwargs,
+            verbose=verbose)
+
 
 class _BaseVolSourceEstimate(_BaseSourceEstimate):
 
     _src_type = 'volume'
     _src_count = None
+
+    @copy_function_doc_to_method_doc(plot_source_estimates)
+    def plot_3d(self, subject=None, surface='white', hemi='both',
+                colormap='auto', time_label='auto', smoothing_steps=10,
+                transparent=True, alpha=0.1, time_viewer='auto',
+                subjects_dir=None,
+                figure=None, views='axial', colorbar=True, clim='auto',
+                cortex="classic", size=800, background="black",
+                foreground=None, initial_time=None, time_unit='s',
+                backend='auto', spacing='oct6', title=None, show_traces='auto',
+                src=None, volume_options=1., view_layout='vertical',
+                add_data_kwargs=None, verbose=None):
+        return super().plot(
+            subject=subject, surface=surface, hemi=hemi, colormap=colormap,
+            time_label=time_label, smoothing_steps=smoothing_steps,
+            transparent=transparent, alpha=alpha, time_viewer=time_viewer,
+            subjects_dir=subjects_dir,
+            figure=figure, views=views, colorbar=colorbar, clim=clim,
+            cortex=cortex, size=size, background=background,
+            foreground=foreground, initial_time=initial_time,
+            time_unit=time_unit, backend=backend, spacing=spacing, title=title,
+            show_traces=show_traces, src=src, volume_options=volume_options,
+            view_layout=view_layout, add_data_kwargs=add_data_kwargs,
+            verbose=verbose)
 
     @copy_function_doc_to_method_doc(plot_volume_source_estimates)
     def plot(self, src, subject=None, subjects_dir=None, mode='stat_map',
@@ -2144,6 +2195,9 @@ class VolSourceEstimate(_BaseVolSourceEstimate):
         if ftype != 'h5' and len(self.vertices) != 1:
             raise ValueError('Can only write to .stc or .w if a single volume '
                              'source space was used, use .h5 instead')
+        if ftype != 'h5' and self.data.dtype == 'complex':
+            raise ValueError('Can only write non-complex data to .stc or .w'
+                             ', use .h5 instead')
         if ftype == 'stc':
             logger.info('Writing STC to disk...')
             if not (fname.endswith('-vl.stc') or fname.endswith('-vol.stc')):
@@ -2161,8 +2215,8 @@ class VolSourceEstimate(_BaseVolSourceEstimate):
 
 
 @fill_doc
-class VolVectorSourceEstimate(_BaseVectorSourceEstimate,
-                              _BaseVolSourceEstimate):
+class VolVectorSourceEstimate(_BaseVolSourceEstimate,
+                              _BaseVectorSourceEstimate):
     """Container for volume source estimates.
 
     Parameters
@@ -2207,6 +2261,33 @@ class VolVectorSourceEstimate(_BaseVectorSourceEstimate,
     """
 
     _scalar_class = VolSourceEstimate
+
+    # defaults differ: hemi='both', views='axial'
+    @copy_function_doc_to_method_doc(plot_vector_source_estimates)
+    def plot_3d(self, subject=None, hemi='both', colormap='hot',
+                time_label='auto',
+                smoothing_steps=10, transparent=True, brain_alpha=0.4,
+                overlay_alpha=None, vector_alpha=1.0, scale_factor=None,
+                time_viewer='auto', subjects_dir=None, figure=None,
+                views='axial',
+                colorbar=True, clim='auto', cortex='classic', size=800,
+                background='black', foreground=None, initial_time=None,
+                time_unit='s', show_traces='auto', src=None,
+                volume_options=1., view_layout='vertical',
+                add_data_kwargs=None, verbose=None):  # noqa: D102
+        return _BaseVectorSourceEstimate.plot(
+            self, subject=subject, hemi=hemi, colormap=colormap,
+            time_label=time_label, smoothing_steps=smoothing_steps,
+            transparent=transparent, brain_alpha=brain_alpha,
+            overlay_alpha=overlay_alpha, vector_alpha=vector_alpha,
+            scale_factor=scale_factor, time_viewer=time_viewer,
+            subjects_dir=subjects_dir, figure=figure, views=views,
+            colorbar=colorbar, clim=clim, cortex=cortex, size=size,
+            background=background, foreground=foreground,
+            initial_time=initial_time, time_unit=time_unit,
+            show_traces=show_traces, src=src, volume_options=volume_options,
+            view_layout=view_layout, add_data_kwargs=add_data_kwargs,
+            verbose=verbose)
 
 
 @fill_doc
@@ -2257,27 +2338,6 @@ class VectorSourceEstimate(_BaseVectorSourceEstimate,
     """
 
     _scalar_class = SourceEstimate
-
-    @copy_function_doc_to_method_doc(plot_vector_source_estimates)
-    def plot(self, subject=None, hemi='lh', colormap='hot', time_label='auto',
-             smoothing_steps=10, transparent=True, brain_alpha=0.4,
-             overlay_alpha=None, vector_alpha=1.0, scale_factor=None,
-             time_viewer='auto', subjects_dir=None, figure=None, views='lat',
-             colorbar=True, clim='auto', cortex='classic', size=800,
-             background='black', foreground=None, initial_time=None,
-             time_unit='s', show_traces='auto', verbose=None):  # noqa: D102
-        return plot_vector_source_estimates(
-            self, subject=subject, hemi=hemi, colormap=colormap,
-            time_label=time_label, smoothing_steps=smoothing_steps,
-            transparent=transparent, brain_alpha=brain_alpha,
-            overlay_alpha=overlay_alpha, vector_alpha=vector_alpha,
-            scale_factor=scale_factor, time_viewer=time_viewer,
-            subjects_dir=subjects_dir, figure=figure, views=views,
-            colorbar=colorbar, clim=clim, cortex=cortex, size=size,
-            background=background, foreground=foreground,
-            initial_time=initial_time, time_unit=time_unit,
-            show_traces=show_traces, verbose=verbose,
-        )
 
 
 ###############################################################################
@@ -2874,35 +2934,48 @@ def _temporary_vertices(src, vertices):
 
 def _prepare_label_extraction(stc, labels, src, mode, allow_empty, use_sparse):
     """Prepare indices and flips for extract_label_time_course."""
-    # if src is a mixed src space, the first 2 src spaces are surf type and
-    # the other ones are vol type. For mixed source space n_labels will be the
+    # If src is a mixed src space, the first 2 src spaces are surf type and
+    # the other ones are vol type. For mixed source space n_labels will be
     # given by the number of ROIs of the cortical parcellation plus the number
-    # of vol src space
+    # of vol src space.
+    # If stc=None (i.e. no activation time courses provided) and mode='mean',
+    # only computes vertex indices and label_flip will be list of None.
     from .label import label_sign_flip, Label, BiHemiLabel
 
-    # get vertices from source space, they have to be the same as in the stcs
-    vertno = stc.vertices
+    # if source estimate provided in stc, get vertices from source space and
+    # check that they are the same as in the stcs
+    if stc is not None:
+        vertno = stc.vertices
+
+        for s, v, hemi in zip(src, stc.vertices, ('left', 'right')):
+            n_missing = (~np.in1d(v, s['vertno'])).sum()
+            if n_missing:
+                raise ValueError('%d/%d %s hemisphere stc vertices missing '
+                                 'from the source space, likely mismatch'
+                                 % (n_missing, len(v), hemi))
+    else:
+        vertno = [s['vertno'] for s in src]
+
     nvert = [len(vn) for vn in vertno]
 
-    # do the initialization
-    label_vertidx = list()
+    # initialization
     label_flip = list()
-    for s, v, hemi in zip(src, stc.vertices, ('left', 'right')):
-        n_missing = (~np.in1d(v, s['vertno'])).sum()
-        if n_missing:
-            raise ValueError('%d/%d %s hemisphere stc vertices missing from '
-                             'the source space, likely mismatch'
-                             % (n_missing, len(v), hemi))
+    label_vertidx = list()
+
     bad_labels = list()
     for li, label in enumerate(labels):
         if use_sparse:
             assert isinstance(label, dict)
+            vertidx = label['csr']
             # This can happen if some labels aren't present in the space
-            if label['csr'].shape[0] == 0:
+            if vertidx.shape[0] == 0:
                 bad_labels.append(label['name'])
-                label_vertidx.append(None)
-            else:
-                label_vertidx.append(label['csr'])
+                vertidx = None
+            # Efficiency shortcut: use linearity early to avoid redundant
+            # calculations
+            elif mode == 'mean':
+                vertidx = sparse.csr_matrix(vertidx.mean(axis=0))
+            label_vertidx.append(vertidx)
             label_flip.append(None)
             continue
         # standard case
@@ -3105,7 +3178,7 @@ def _gen_extract_label_time_course(stcs, labels, src, mode='mean',
                     assert mri_resolution
                     assert vertidx.shape[1] == stc.data.shape[0]
                     this_data = np.reshape(stc.data, (stc.data.shape[0], -1))
-                    this_data = vertidx * this_data
+                    this_data = vertidx @ this_data
                     this_data.shape = \
                         (this_data.shape[0],) + stc.data.shape[1:]
                 else:

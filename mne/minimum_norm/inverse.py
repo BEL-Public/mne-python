@@ -12,6 +12,7 @@ from scipy import linalg
 
 from ._eloreta import _compute_eloreta
 from ..fixes import _safe_svd
+from ..io.base import BaseRaw
 from ..io.constants import FIFF
 from ..io.open import fiff_open
 from ..io.tag import find_tag
@@ -27,7 +28,8 @@ from ..io.write import (write_int, write_float_matrix, start_file,
 from ..io.pick import channel_type, pick_info, pick_types, pick_channels
 from ..cov import (compute_whitener, _read_cov, _write_cov, Covariance,
                    prepare_noise_cov)
-from ..evoked import EvokedArray
+from ..epochs import BaseEpochs
+from ..evoked import EvokedArray, Evoked
 from ..forward import (compute_depth_prior, _read_forward_meas_info,
                        is_fixed_orient, compute_orient_prior,
                        convert_forward_solution, _select_orient_forward)
@@ -118,7 +120,7 @@ def read_inverse_operator(fname, verbose=None):
     #
     logger.info('Reading inverse operator decomposition from %s...'
                 % fname)
-    f, tree, _ = fiff_open(fname, preload=True)
+    f, tree, _ = fiff_open(fname)
     with f as fid:
         #
         #   Find all inverse operators
@@ -878,6 +880,7 @@ def apply_inverse(evoked, inverse_operator, lambda2=1. / 9., method="dSPM",
 
 def _apply_inverse(evoked, inverse_operator, lambda2, method, pick_ori,
                    prepared, label, method_params, return_residual, use_cps):
+    _validate_type(evoked, Evoked, 'evoked')
     _check_reference(evoked, inverse_operator['info']['ch_names'])
     _check_option('method', method, INVERSE_METHODS)
     _check_ori(pick_ori, inverse_operator['source_ori'],
@@ -1005,6 +1008,7 @@ def apply_inverse_raw(raw, inverse_operator, lambda2, method="dSPM",
     apply_inverse_epochs : Apply inverse operator to epochs object.
     apply_inverse : Apply inverse operator to evoked object.
     """
+    _validate_type(raw, BaseRaw, 'raw')
     _check_reference(raw, inverse_operator['info']['ch_names'])
     _check_option('method', method, INVERSE_METHODS)
     _check_ori(pick_ori, inverse_operator['source_ori'],
@@ -1083,6 +1087,7 @@ def _apply_inverse_epochs_gen(epochs, inverse_operator, lambda2, method='dSPM',
                               prepared=False, method_params=None,
                               use_cps=True, verbose=None):
     """Generate inverse solutions for epochs. Used in apply_inverse_epochs."""
+    _validate_type(epochs, BaseEpochs, 'epochs')
     _check_option('method', method, INVERSE_METHODS)
     _check_ori(pick_ori, inverse_operator['source_ori'],
                inverse_operator['src'])
@@ -1396,7 +1401,8 @@ def _prepare_forward(forward, info, noise_cov, fixed, loose, rank, pca,
     noise_cov = prepare_noise_cov(
         noise_cov, info, info_picked['ch_names'], rank)
     whitener, _ = compute_whitener(
-        noise_cov, info, info_picked['ch_names'], pca=pca, verbose=False)
+        noise_cov, info, info_picked['ch_names'], pca=pca, verbose=False,
+        rank=rank)
     gain = np.dot(whitener, forward['sol']['data'])
 
     logger.info('Creating the source covariance matrix')

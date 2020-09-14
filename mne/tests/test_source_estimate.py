@@ -261,14 +261,22 @@ def test_expand():
         pytest.raises(ValueError, stc.__add__, stc.in_label(labels_lh[0]))
 
 
-def _fake_stc(n_time=10):
+def _fake_stc(n_time=10, is_complex=False):
+    np.random.seed(7)
     verts = [np.arange(10), np.arange(90)]
-    return SourceEstimate(np.random.rand(100, n_time), verts, 0, 1e-1, 'foo')
+    data = np.random.rand(100, n_time)
+    if is_complex:
+        data.astype(complex)
+    return SourceEstimate(data, verts, 0, 1e-1, 'foo')
 
 
-def _fake_vec_stc(n_time=10):
+def _fake_vec_stc(n_time=10, is_complex=False):
+    np.random.seed(7)
     verts = [np.arange(10), np.arange(90)]
-    return VectorSourceEstimate(np.random.rand(100, 3, n_time), verts, 0, 1e-1,
+    data = np.random.rand(100, 3, n_time)
+    if is_complex:
+        data.astype(complex)
+    return VectorSourceEstimate(data, verts, 0, 1e-1,
                                 'foo')
 
 
@@ -278,7 +286,9 @@ def test_stc_snr():
     inv = read_inverse_operator(fname_inv_fixed)
     fwd = read_forward_solution(fname_fwd)
     cov = read_cov(fname_cov)
-    evoked = read_evokeds(fname_evoked, baseline=(None, 0))[0].crop(0, 0.01)
+    with pytest.warns(RuntimeWarning, match='Cropping removes baseline'):
+        evoked = (read_evokeds(fname_evoked, baseline=(None, 0))[0]
+                  .crop(0, 0.01))
     stc = apply_inverse(evoked, inv)
     assert (stc.data < 0).any()
     with pytest.warns(RuntimeWarning, match='nAm'):
@@ -379,27 +389,32 @@ def test_io_stc(tmpdir):
 
 
 @requires_h5py
-def test_io_stc_h5(tmpdir):
+@pytest.mark.parametrize('is_complex', (True, False))
+@pytest.mark.parametrize('vector', (True, False))
+def test_io_stc_h5(tmpdir, is_complex, vector):
     """Test IO for STC files using HDF5."""
-    for stc in [_fake_stc(), _fake_vec_stc()]:
-        pytest.raises(ValueError, stc.save, tmpdir.join('tmp'),
-                      ftype='foo')
-        out_name = tmpdir.join('tmp')
-        stc.save(out_name, ftype='h5')
-        stc.save(out_name, ftype='h5')  # test overwrite
-        stc3 = read_source_estimate(out_name)
-        stc4 = read_source_estimate(out_name + '-stc')
-        stc5 = read_source_estimate(out_name + '-stc.h5')
-        pytest.raises(RuntimeError, read_source_estimate, out_name,
-                      subject='bar')
-        for stc_new in stc3, stc4, stc5:
-            assert_equal(stc_new.subject, stc.subject)
-            assert_array_equal(stc_new.data, stc.data)
-            assert_array_equal(stc_new.tmin, stc.tmin)
-            assert_array_equal(stc_new.tstep, stc.tstep)
-            assert_equal(len(stc_new.vertices), len(stc.vertices))
-            for v1, v2 in zip(stc_new.vertices, stc.vertices):
-                assert_array_equal(v1, v2)
+    if vector:
+        stc = _fake_vec_stc(is_complex=is_complex)
+    else:
+        stc = _fake_stc(is_complex=is_complex)
+    pytest.raises(ValueError, stc.save, tmpdir.join('tmp'),
+                  ftype='foo')
+    out_name = tmpdir.join('tmp')
+    stc.save(out_name, ftype='h5')
+    stc.save(out_name, ftype='h5')  # test overwrite
+    stc3 = read_source_estimate(out_name)
+    stc4 = read_source_estimate(out_name + '-stc')
+    stc5 = read_source_estimate(out_name + '-stc.h5')
+    pytest.raises(RuntimeError, read_source_estimate, out_name,
+                  subject='bar')
+    for stc_new in stc3, stc4, stc5:
+        assert_equal(stc_new.subject, stc.subject)
+        assert_array_equal(stc_new.data, stc.data)
+        assert_array_equal(stc_new.tmin, stc.tmin)
+        assert_array_equal(stc_new.tstep, stc.tstep)
+        assert_equal(len(stc_new.vertices), len(stc.vertices))
+        for v1, v2 in zip(stc_new.vertices, stc.vertices):
+            assert_array_equal(v1, v2)
 
 
 def test_io_w(tmpdir):
@@ -825,7 +840,9 @@ def test_extract_label_time_course_equiv():
     assert len(label) == 1
     label = label[0]
     inv = read_inverse_operator(fname_inv)
-    evoked = read_evokeds(fname_evoked, baseline=(None, 0))[0].crop(0, 0.01)
+    with pytest.warns(RuntimeWarning, match='Cropping removes baseline'):
+        evoked = (read_evokeds(fname_evoked, baseline=(None, 0))[0]
+                  .crop(0, 0.01))
     stc = apply_inverse(evoked, inv, pick_ori='normal', label=label)
     stc_full = apply_inverse(evoked, inv, pick_ori='normal')
     stc_in_label = stc_full.in_label(label)

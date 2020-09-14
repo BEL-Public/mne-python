@@ -549,7 +549,7 @@ def test_vertex_to_mni_fs_nibabel(monkeypatch):
     None,
     op.join(op.dirname(mne.__file__), 'data', 'FreeSurferColorLUT.txt'),
 ])
-def test_read_freesurfer_lut(fname):
+def test_read_freesurfer_lut(fname, tmpdir):
     """Test reading volume label names."""
     atlas_ids, colors = read_freesurfer_lut(fname)
     assert list(atlas_ids).count('Brain-Stem') == 1
@@ -569,6 +569,33 @@ def test_read_freesurfer_lut(fname):
     label_names_2 = get_volume_labels_from_aseg(
         aseg_fname, atlas_ids=atlas_ids)
     assert label_names == label_names_2
+    # long name (only test on one run)
+    if fname is not None:
+        return
+    fname = str(tmpdir.join('long.txt'))
+    names = ['Anterior_Cingulate_and_Medial_Prefrontal_Cortex-' + hemi
+             for hemi in ('lh', 'rh')]
+    ids = np.arange(1, len(names) + 1)
+    colors = [(id_,) * 4 for id_ in ids]
+    with open(fname, 'w') as fid:
+        for name, id_, color in zip(names, ids, colors):
+            out_color = ' '.join('%3d' % x for x in color)
+            line = '%d    %s %s\n' % (id_, name, out_color)
+            fid.write(line)
+    lut, got_colors = read_freesurfer_lut(fname)
+    assert len(lut) == len(got_colors) == len(names) == len(ids)
+    for name, id_, color in zip(names, ids, colors):
+        assert name in lut
+        assert name in got_colors
+        assert_array_equal(got_colors[name][:3], color[:3])
+        assert lut[name] == id_
+    with open(fname, 'w') as fid:
+        for name, id_, color in zip(names, ids, colors):
+            out_color = ' '.join('%3d' % x for x in color[:3])  # wrong length!
+            line = '%d    %s %s\n' % (id_, name, out_color)
+            fid.write(line)
+    with pytest.raises(RuntimeError, match='formatted'):
+        read_freesurfer_lut(fname)
 
 
 @testing.requires_testing_data
@@ -620,6 +647,7 @@ def test_source_space_from_label(tmpdir, pass_ids):
     _compare_source_spaces(src, src_from_file, mode='approx')
 
 
+@requires_nibabel()
 def test_source_space_exclusive_complete(src_volume_labels):
     """Test that we produce exclusive and complete labels."""
     # these two are neighbors and are quite large, so let's use them to
@@ -636,6 +664,14 @@ def test_source_space_exclusive_complete(src_volume_labels):
                        np.sort(np.concatenate([s['vertno'] for s in src])))
     for si, s in enumerate(src):
         assert_allclose(src_full[0]['rr'], s['rr'], atol=1e-6)
+    # also check single_volume=True -- should be the same result
+    src_single = setup_volume_source_space(
+        src[0]['subject_his_id'], 7., 'aseg.mgz', bem=fname_bem,
+        volume_label=volume_labels, single_volume=True, add_interpolator=False,
+        subjects_dir=subjects_dir)
+    assert len(src_single) == 1
+    assert 'Unknown+Left-Cerebral-White-Matter+Left-' in repr(src_single)
+    assert_array_equal(src_full[0]['vertno'], src_single[0]['vertno'])
 
 
 @pytest.mark.timeout(60)  # ~24 sec on Travis

@@ -9,6 +9,7 @@ import glob
 import os
 import os.path as op
 import shutil
+import pathlib
 
 import numpy as np
 from numpy.testing import assert_equal
@@ -85,7 +86,9 @@ def test_render_report(renderer, tmpdir):
     epochs.save(epochs_fname, overwrite=True)
     # This can take forever (stall Travis), so let's make it fast
     # Also, make sure crop range is wide enough to avoid rendering bug
-    epochs.average().crop(0.1, 0.2).save(evoked_fname)
+    with pytest.warns(RuntimeWarning, match='Cropping removes baseline'):
+        evoked = epochs.average().crop(0.1, None)
+    evoked.save(evoked_fname)
 
     report = Report(info_fname=raw_fname_new, subjects_dir=subjects_dir,
                     projs=True)
@@ -116,6 +119,10 @@ def test_render_report(renderer, tmpdir):
     assert '<h4>SSP Projectors</h4>' in html
     # Projectors in `proj_fname_new`
     assert f'SSP Projectors: {op.basename(proj_fname_new)}' in html
+    # Evoked in `evoked_fname`
+    assert f'Evoked: {op.basename(evoked_fname)} ({evoked.comment})' in html
+    assert 'Topomap (ch_type =' in html
+    assert f'Evoked: {op.basename(evoked_fname)} (GFPs)' in html
 
     assert_equal(len(report.html), len(fnames))
     assert_equal(len(report.html), len(report.fnames))
@@ -148,6 +155,7 @@ def test_render_report(renderer, tmpdir):
     # SVG rendering
     report = Report(info_fname=raw_fname_new, subjects_dir=subjects_dir,
                     image_format='svg')
+    tempdir = pathlib.Path(tempdir)  # test using pathlib.Path
     with pytest.warns(RuntimeWarning, match='Cannot render MRI'):
         report.parse_folder(data_path=tempdir, on_error='raise')
 
@@ -245,6 +253,11 @@ def test_render_add_sections(renderer, tmpdir):
     report.add_figs_to_section(figs=fig,  # test non-list input
                                captions='random image', scale=1.2)
     assert (repr(report))
+    fname = op.join(str(tmpdir), 'test.html')
+    report.save(fname, open_browser=False)
+    with open(fname, 'r') as fid:
+        html = fid.read()
+    assert html.count('<li class="report_custom"') == 8  # several
 
 
 @pytest.mark.slowtest
@@ -259,15 +272,19 @@ def test_render_mri(renderer, tmpdir):
     report = Report(info_fname=raw_fname,
                     subject='sample', subjects_dir=subjects_dir)
     report.parse_folder(data_path=tempdir, mri_decim=30, pattern='*')
-    report.save(op.join(tempdir, 'report.html'), open_browser=False)
+    fname = op.join(tempdir, 'report.html')
+    report.save(fname, open_browser=False)
+    with open(fname, 'r') as fid:
+        html = fid.read()
+    assert html.count('<li class="bem"') == 2  # left and content
     assert repr(report)
     report.add_bem_to_section('sample', caption='extra', section='foo',
                               subjects_dir=subjects_dir, decim=30)
-    fname = op.join(tempdir, 'report.html')
     report.save(fname, open_browser=False, overwrite=True)
     with open(fname, 'r') as fid:
         html = fid.read()
-    assert 'class="report_foo"' in html
+    assert 'report_report' not in html
+    assert html.count('<li class="report_foo"') == 2
 
 
 @testing.requires_testing_data
@@ -283,6 +300,7 @@ def test_render_mri_without_bem(tmpdir):
     report.parse_folder(tempdir, render_bem=False)
     with pytest.warns(RuntimeWarning, match='No BEM surfaces found'):
         report.parse_folder(tempdir, render_bem=True, mri_decim=20)
+    assert 'bem' in report.fnames
     report.save(op.join(tempdir, 'report.html'), open_browser=False)
 
 

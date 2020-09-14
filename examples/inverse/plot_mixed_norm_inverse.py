@@ -4,9 +4,8 @@ Compute sparse inverse solution with mixed norm: MxNE and irMxNE
 ================================================================
 
 Runs an (ir)MxNE (L1/L2 [1]_ or L0.5/L2 [2]_ mixed norm) inverse solver.
-L0.5/L2 is done with irMxNE which allows for sparser
-source estimates with less amplitude bias due to the non-convexity
-of the L0.5/L2 mixed norm penalty.
+L0.5/L2 is done with irMxNE which allows for sparser source estimates with less
+amplitude bias due to the non-convexity of the L0.5/L2 mixed norm penalty.
 """
 # Author: Alexandre Gramfort <alexandre.gramfort@inria.fr>
 #         Daniel Strohmeier <daniel.strohmeier@tu-ilmenau.de>
@@ -37,7 +36,7 @@ cov = mne.read_cov(cov_fname)
 # Handling average file
 condition = 'Left Auditory'
 evoked = mne.read_evokeds(ave_fname, condition=condition, baseline=(None, 0))
-evoked.crop(tmin=0, tmax=0.3)
+evoked.crop(tmin=0, tmax=0.3, verbose='error')  # ignore baseline
 # Handling forward solution
 forward = mne.read_forward_solution(fwd_fname)
 

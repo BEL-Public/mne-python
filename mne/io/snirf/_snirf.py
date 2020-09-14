@@ -4,12 +4,17 @@
 
 import re
 import numpy as np
+import datetime
 
 from ..base import BaseRaw
 from ..meas_info import create_info
+from ..utils import _mult_cal_one
 from ...annotations import Annotations
 from ...utils import logger, verbose, fill_doc, warn
 from ...utils.check import _require_version
+from ..constants import FIFF
+from .._digitization import _make_dig_points
+from ...transforms import _frame_to_str
 
 
 @fill_doc
@@ -150,6 +155,23 @@ class RawSNIRF(BaseRaw):
             subject_info = {}
             names = np.array(dat.get('nirs/metaDataTags/SubjectID'))
             subject_info['first_name'] = names[0].decode('UTF-8')
+            # Read non standard (but allowed) custom metadata tags
+            if 'lastName' in dat.get('nirs/metaDataTags/'):
+                ln = dat.get('/nirs/metaDataTags/lastName')[0].decode('UTF-8')
+                subject_info['last_name'] = ln
+            if 'middleName' in dat.get('nirs/metaDataTags/'):
+                m = dat.get('/nirs/metaDataTags/middleName')[0].decode('UTF-8')
+                subject_info['middle_name'] = m
+            if 'sex' in dat.get('nirs/metaDataTags/'):
+                s = dat.get('/nirs/metaDataTags/sex')[0].decode('UTF-8')
+                if s in {'M', 'Male', '1', 'm'}:
+                    subject_info['sex'] = FIFF.FIFFV_SUBJ_SEX_MALE
+                elif s in {'F', 'Female', '2', 'f'}:
+                    subject_info['sex'] = FIFF.FIFFV_SUBJ_SEX_FEMALE
+                elif s in {'0', 'u'}:
+                    subject_info['sex'] = FIFF.FIFFV_SUBJ_SEX_UNKNOWN
+            # End non standard name reading
+            # Update info
             info.update(subject_info=subject_info)
 
             LengthUnit = np.array(dat.get('/nirs/metaDataTags/LengthUnit'))
@@ -174,6 +196,65 @@ class RawSNIRF(BaseRaw):
                             info['chs'][idx]['loc'][6:9]) / 2
                 info['chs'][idx]['loc'][0:3] = midpoint
                 info['chs'][idx]['loc'][9] = fnirs_wavelengths[wve_idx - 1]
+
+            if 'MNE_coordFrame' in dat.get('nirs/metaDataTags/'):
+                coord_frame = int(dat.get('/nirs/metaDataTags/MNE_coordFrame')
+                                  [0])
+            else:
+                coord_frame = FIFF.FIFFV_COORD_UNKNOWN
+
+            if 'landmarkPos3D' in dat.get('nirs/probe/'):
+                diglocs = np.array(dat.get('/nirs/probe/landmarkPos3D'))
+                digname = np.array(dat.get('/nirs/probe/landmarkLabels'))
+                nasion, lpa, rpa, hpi = None, None, None, None
+                extra_ps = dict()
+                for idx, dign in enumerate(digname):
+                    if dign == b'LPA':
+                        lpa = diglocs[idx, :]
+                    elif dign == b'NASION':
+                        nasion = diglocs[idx, :]
+                    elif dign == b'RPA':
+                        rpa = diglocs[idx, :]
+                    else:
+                        extra_ps[f'EEG{len(extra_ps) + 1:03d}'] = diglocs[idx]
+                info['dig'] = _make_dig_points(nasion=nasion, lpa=lpa, rpa=rpa,
+                                               hpi=hpi, dig_ch_pos=extra_ps,
+                                               coord_frame=_frame_to_str[
+                                                   coord_frame])
+
+            str_date = np.array((dat.get(
+                '/nirs/metaDataTags/MeasurementDate')))[0].decode('UTF-8')
+            str_time = np.array((dat.get(
+                '/nirs/metaDataTags/MeasurementTime')))[0].decode('UTF-8')
+            str_datetime = str_date + str_time
+
+            # Several formats have been observed so we try each in turn
+            for dt_code in ['%Y-%m-%d%H:%M:%SZ',
+                            '%Y-%m-%d%H:%M:%S']:
+                try:
+                    meas_date = datetime.datetime.strptime(
+                        str_datetime, dt_code)
+                except ValueError:
+                    pass
+                else:
+                    break
+            else:
+                warn("Extraction of measurement date from SNIRF file failed. "
+                     "The date is being set to January 1st, 2000, "
+                     f"instead of {str_datetime}")
+                meas_date = datetime.datetime(2000, 1, 1, 0, 0, 0)
+            meas_date = meas_date.replace(tzinfo=datetime.timezone.utc)
+            info['meas_date'] = meas_date
+
+            if 'DateOfBirth' in dat.get('nirs/metaDataTags/'):
+                str_birth = np.array((dat.get('/nirs/metaDataTags/'
+                                              'DateOfBirth')))[0].decode()
+                birth_matched = re.fullmatch(r'(\d+)-(\d+)-(\d+)', str_birth)
+                if birth_matched is not None:
+                    info["subject_info"]['birthday'] = (
+                        int(birth_matched.groups()[0]),
+                        int(birth_matched.groups()[1]),
+                        int(birth_matched.groups()[2]))
 
             super(RawSNIRF, self).__init__(info, preload, filenames=[fname],
                                            last_samps=[last_samps],
@@ -201,6 +282,6 @@ class RawSNIRF(BaseRaw):
         import h5py
 
         with h5py.File(self._filenames[0], 'r') as dat:
-            data[:] = dat.get('/nirs/data1/dataTimeSeries')[start:stop].T[idx]
+            one = dat['/nirs/data1/dataTimeSeries'][start:stop].T
 
-        return data
+        _mult_cal_one(data, one, idx, cals, mult)
