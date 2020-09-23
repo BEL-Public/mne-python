@@ -1301,8 +1301,8 @@ volume_options : float | dict | None
         space resolution, which is often something like 7 or 5 mm,
         without resampling.
     - ``'blending'`` : str
-        Can be "mip" (default) for maximum intensity projection or
-        "composite" for composite blending.
+        Can be "mip" (default) for :term:`maximum intensity projection` or
+        "composite" for composite blending using alpha values.
     - ``'alpha'`` : float | None
         Alpha for the volumetric rendering. Defaults are 0.4 for vector source
         estimates and 1.0 for scalar source estimates.
@@ -1698,53 +1698,44 @@ Operates in place.
 """
 
 # Baseline
-baseline_kwarg = """
+docdict['rescale_baseline'] = """
 baseline : None | tuple of length 2
-    If a tuple ``(a, b)``, apply baseline correction with the baseline
-    interval ``[a, b] sec`` (including the endpoints).
-    If ``a`` is ``None``, the **beginning** of the {data_type} time period is
-    used; and if ``b`` is ``None``, the **end** of the time period is used.
-    In case of ``(None, None)``, the **entire** time period is used.
+    The time interval to consider as "baseline" when applying baseline
+    correction. If ``None``, do not apply baseline correction.
+    If a tuple ``(a, b)``, the interval is between ``a`` and ``b``
+    (in seconds), including the endpoints.
+    If ``a`` is ``None``, the **beginning** of the data is used; and if ``b``
+    is ``None``, it is set to the **end** of the interval.
+    If ``(None, None)``, the entire time interval is used.
 
     .. note:: The baseline ``(a, b)`` includes both endpoints, i.e. all
-              timepoints ``t`` such that ``a <= t <= b``.
-{computation}
+                timepoints ``t`` such that ``a <= t <= b``.
 """
-baseline_kwarg_none_and_defaults = """
-    If ``None``, do not apply baseline correction.
+docdict['baseline_epochs'] = """%(rescale_baseline)s
+    Correction is applied **to each epoch and channel individually** in the
+    following way:
 
-    Defaults to ``(None, 0)``, i.e., the beginning of the the {data_type} until
-    time point zero.
+    1. Calculate the mean signal of the baseline period.
+    2. Subtract this mean from the **entire** epoch.
 
-    .. note:: Baseline correction can be done multiple times, but once applied,
-              it can never be removed.
-"""
-baseline_computation_epochs = """
-    Baseline correction is applied by computing the mean of the baseline period
-    across all {data_type}, and subtracting it from all {data_type}."""
-baseline_computation_evoked = """
-    Baseline correction is applied by computing the mean of the baseline
-    period, and subtracting it from the data."""
+""" % docdict
+docdict['baseline_evoked'] = """%(rescale_baseline)s
+    Correction is applied **to each channel individually** in the following
+    way:
 
-docdict['baseline_array'] = baseline_kwarg.format(
-    data_type="array's",
-    computation='')
-docdict['baseline_epochs'] = baseline_kwarg + baseline_kwarg_none_and_defaults
-docdict['baseline_epochs'] = docdict['baseline_epochs'].format(
-    data_type='epochs',
-    computation=baseline_computation_epochs)
+    1. Calculate the mean signal of the baseline period.
+    2. Subtract this mean from the **entire** ``Evoked``.
 
-docdict['baseline_evoked'] = baseline_kwarg + baseline_kwarg_none_and_defaults
-docdict['baseline_evoked'] = docdict['baseline_evoked'].format(
-    data_type='evoked',
-    computation=baseline_computation_evoked)
-docdict['baseline_common_evoked'] = baseline_kwarg.format(
-    data_type='evoked',
-    computation=baseline_computation_evoked)
+""" % docdict
+docdict['baseline_report'] = """%(rescale_baseline)s
+    Correction is applied in the following way **to each channel:**
 
-docdict['baseline_report'] = baseline_kwarg.format(
-    data_type="data's",
-    computation='')
+    1. Calculate the mean signal of the baseline period.
+    2. Subtract this mean from the **entire** time period.
+
+    For `~mne.Epochs`, this algorithm is run **on each epoch individually.**
+""" % docdict
+
 
 # Finalize
 docdict = unindent_dict(docdict)

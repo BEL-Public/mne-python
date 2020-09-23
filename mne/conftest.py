@@ -203,8 +203,7 @@ def _evoked():
     # instead)
     evoked = mne.read_evokeds(fname_evoked, condition='Left Auditory',
                               baseline=(None, 0))
-    with pytest.warns(RuntimeWarning, match='Cropping removes baseline'):
-        evoked.crop(0, 0.2)
+    evoked.crop(0, 0.2)
     return evoked
 
 
@@ -484,7 +483,6 @@ def pytest_sessionfinish(session, exitstatus):
         return
     from py.io import TerminalWriter
     # get the number to print
-    writer = TerminalWriter()
     res = pytest_harvest.get_session_synthesis_dct(session)
     files = dict()
     for key, val in res.items():
@@ -500,11 +498,13 @@ def pytest_sessionfinish(session, exitstatus):
     files = sorted(list(files.items()), key=lambda x: x[1])[::-1]
     # print
     files = files[:n]
-    writer.line()  # newline
-    writer.sep('=', f'slowest {n} test module{_pl(n)}')
-    names, timings = zip(*files)
-    timings = [f'{timing:0.2f}s total' for timing in timings]
-    rjust = max(len(timing) for timing in timings)
-    timings = [timing.rjust(rjust) for timing in timings]
-    for name, timing in zip(names, timings):
-        writer.line(f'{timing.ljust(15)}{name}')
+    if len(files):
+        writer = TerminalWriter()
+        writer.line()  # newline
+        writer.sep('=', f'slowest {n} test module{_pl(n)}')
+        names, timings = zip(*files)
+        timings = [f'{timing:0.2f}s total' for timing in timings]
+        rjust = max(len(timing) for timing in timings)
+        timings = [timing.rjust(rjust) for timing in timings]
+        for name, timing in zip(names, timings):
+            writer.line(f'{timing.ljust(15)}{name}')

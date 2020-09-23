@@ -36,7 +36,7 @@ cov = mne.read_cov(cov_fname)
 # Handling average file
 condition = 'Left Auditory'
 evoked = mne.read_evokeds(ave_fname, condition=condition, baseline=(None, 0))
-evoked.crop(tmin=0, tmax=0.3, verbose='error')  # ignore baseline
+evoked.crop(tmin=0, tmax=0.3)
 # Handling forward solution
 forward = mne.read_forward_solution(fwd_fname)
 
@@ -59,7 +59,13 @@ dipoles, residual = mixed_norm(
     evoked, forward, cov, alpha, loose=loose, depth=depth, maxit=3000,
     tol=1e-4, active_set_size=10, debias=True, weights=stc_dspm,
     weights_min=8., n_mxne_iter=n_mxne_iter, return_residual=True,
-    return_as_dipoles=True)
+    return_as_dipoles=True, verbose=True)
+
+t = 0.083
+tidx = evoked.time_as_index(t)
+for di, dip in enumerate(dipoles, 1):
+    print(f'Dipole #{di} GOF at {1000 * t:0.1f} ms: '
+          f'{float(dip.gof[tidx]):0.1f}%')
 
 ###############################################################################
 # Plot dipole activations
